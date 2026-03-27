@@ -11,7 +11,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 TURKEY_CHANNEL_ID = 1486631386533199872
 EXCLUDED_ROLE_IDS = [1486571017806811228, 1486560941368803389]  # Asyl + spieSS
-INACTIVITY_TIME = 2 * 45 * 45  # 2 Stunden
+INACTIVITY_TIME = 2 * 45 * 45  # 1.5 Stunden
 
 last_activity = {}
 
