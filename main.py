@@ -2,16 +2,36 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 import os
+import threading
+from flask import Flask
 
+# ================== FLASK WEBSERVER FÜR RENDER ==================
+app = Flask(__name__)
+
+@app.route('/')
+@app.route('/ping')
+def ping():
+    return "AFK Bot is alive!", 200
+
+def run_webserver():
+    port = int(os.environ.get("PORT", 10000))   # Render gibt uns diesen Port
+    app.run(host='0.0.0.0', port=port)
+
+# Webserver im Hintergrund starten
+threading.Thread(target=run_webserver, daemon=True).start()
+# ============================================================
+
+# Discord Bot Setup
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
+# intents.message_content = True   # falls du später Commands brauchst
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 TURKEY_CHANNEL_ID = 1486631386533199872
-EXCLUDED_ROLE_IDS = [1486571017806811228, 1486560941368803389]  # Asyl + spieSS
-INACTIVITY_TIME = 1.5 * 60 * 60  # 1.5 Stunden in Sekunden
+EXCLUDED_ROLE_IDS = [1486571017806811228, 1486560941368803389]
+INACTIVITY_TIME = 1.5 * 60 * 60
 
 last_active = {}
 
