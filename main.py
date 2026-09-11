@@ -1,10 +1,14 @@
 import discord
-import discord
 from discord.ext import commands, tasks
 import datetime
 import os
 import threading
 from flask import Flask
+from dotenv import load_dotenv
+
+# ================== .ENV LADEN ==================
+load_dotenv("/opt/discordbot/.env")
+# ================================================
 
 # ================== KLEINER STATUS-WEBSERVER ==================
 app = Flask(__name__)
@@ -58,6 +62,7 @@ async def on_voice_state_update(member, before, after):
 
         was_muted = before.self_mute or before.mute or before.self_deaf or before.deaf
         is_muted = after.self_mute or after.mute or after.self_deaf or after.deaf
+
         if was_muted and not is_muted:
             last_active[member.id] = now
 
@@ -76,9 +81,11 @@ async def check_inactivity():
         for vc in guild.voice_channels:
             if vc.id == TURKEY_CHANNEL_ID:
                 continue
+
             for member in vc.members:
                 if member.bot:
                     continue
+
                 if any(role.id in EXCLUDED_ROLE_IDS for role in member.roles):
                     continue
 
@@ -91,10 +98,14 @@ async def check_inactivity():
                     continue
 
                 inaktiv_seit = (now - last_active[member.id]).total_seconds()
+
                 if inaktiv_seit > INACTIVITY_TIME:
                     try:
                         await member.move_to(turkey_channel)
-                        print(f"→ {member.name} wurde in die Türkei geschoben (inaktiv seit {inaktiv_seit/60:.0f} min)")
+                        print(
+                            f"→ {member.name} wurde in die Türkei geschoben "
+                            f"(inaktiv seit {inaktiv_seit/60:.0f} min)"
+                        )
                     except Exception as e:
                         print(f"Fehler beim Verschieben von {member.name}: {e}")
 
