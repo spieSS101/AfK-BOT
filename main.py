@@ -1,4 +1,5 @@
 import discord
+import discord
 from discord.ext import commands, tasks
 import datetime
 import os
@@ -49,7 +50,7 @@ async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.UTC)
 
     if after.channel and after.channel.id != TURKEY_CHANNEL_ID:
         if member.id not in last_active:
@@ -65,7 +66,7 @@ async def on_voice_state_update(member, before, after):
 
 @tasks.loop(minutes=5)
 async def check_inactivity():
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.UTC)
     turkey_channel = bot.get_channel(TURKEY_CHANNEL_ID)
 
     if not turkey_channel:
