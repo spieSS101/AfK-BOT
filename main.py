@@ -2,6 +2,22 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 import os
+import threading
+from flask import Flask
+
+# ================== KLEINER STATUS-WEBSERVER ==================
+app = Flask(__name__)
+
+@app.route('/')
+@app.route('/ping')
+def ping():
+    return "AFK Bot is alive!", 200
+
+def run_webserver():
+    app.run(host='0.0.0.0', port=8080)
+
+threading.Thread(target=run_webserver, daemon=True).start()
+# ============================================================
 
 # Discord Bot Setup
 intents = discord.Intents.default()
