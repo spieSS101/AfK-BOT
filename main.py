@@ -701,9 +701,9 @@ async def delete_voice_notifications(guild, notification_type):
 class ClearNotificationButton(discord.ui.Button):
     def __init__(self, notification_type):
         labels = {
-            "bunker": "Bunker bestätigen",
-            "jerking": "Jerking bestätigen",
-            "bwi": "BWI bestätigen",
+            "bunker": "✓ Gesehen",
+            "jerking": "✓ Gesehen",
+            "bwi": "✓ Gesehen",
         }
 
         super().__init__(
