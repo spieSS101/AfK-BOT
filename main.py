@@ -391,10 +391,172 @@ async def on_member_join(member):
 
     guild = member.guild
 
+    # ==================================================
+    # 1. ZUERST BWI INVITE-VERERBUNG PRÜFEN
+    # ==================================================
+
+    try:
+        current_invites = await guild.invites()
+
+    except discord.Forbidden:
+        print(
+            f"❌ Invite-Erkennung bei {member} "
+            f"nicht möglich."
+        )
+        current_invites = []
+
+    except discord.HTTPException as e:
+        print(
+            f"❌ Discord-Fehler beim Abrufen "
+            f"der Invites für {member}: {e}"
+        )
+        current_invites = []
+
+    old_invites = invite_cache.get(
+        guild.id,
+        {}
+    )
+
+    changed_invites = []
+
+    for invite in current_invites:
+
+        old_uses = old_invites.get(
+            invite.code,
+            0
+        )
+
+        new_uses = invite.uses or 0
+
+        if new_uses > old_uses:
+            changed_invites.append(invite)
+
+    # Cache sofort aktualisieren
+    if current_invites:
+        invite_cache[guild.id] = {
+            invite.code: invite.uses or 0
+            for invite in current_invites
+        }
+
+    if len(changed_invites) == 0:
+
+        print(
+            f"ℹ️ Join erkannt: {member} – "
+            f"Invite konnte nicht bestimmt werden."
+        )
+
+    elif len(changed_invites) > 1:
+
+        print(
+            f"⚠️ Join von {member}: "
+            f"mehrere veränderte Invites erkannt."
+        )
+
+    else:
+
+        used_invite = changed_invites[0]
+        inviter = used_invite.inviter
+
+        if inviter is None:
+
+            print(
+                f"ℹ️ Invite {used_invite.code} "
+                f"hat keinen erkennbaren Ersteller."
+            )
+
+        else:
+
+            inviter_member = guild.get_member(
+                inviter.id
+            )
+
+            if inviter_member is None:
+
+                try:
+                    inviter_member = await guild.fetch_member(
+                        inviter.id
+                    )
+
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException
+                ):
+                    inviter_member = None
+
+                    print(
+                        f"ℹ️ Einladender {inviter} "
+                        f"konnte nicht gefunden werden."
+                    )
+
+            if inviter_member is not None:
+
+                bwi_role = guild.get_role(
+                    BWI_ROLE_ID
+                )
+
+                if bwi_role is None:
+
+                    print(
+                        f"❌ BWI-Rolle mit ID "
+                        f"{BWI_ROLE_ID} wurde nicht gefunden."
+                    )
+
+                elif bwi_role not in inviter_member.roles:
+
+                    print(
+                        f"ℹ️ {member} wurde von "
+                        f"{inviter_member} eingeladen. "
+                        f"Kein BWI vorhanden."
+                    )
+
+                elif bwi_role in member.roles:
+
+                    print(
+                        f"ℹ️ {member} besitzt BWI bereits."
+                    )
+
+                else:
+
+                    try:
+                        await member.add_roles(
+                            bwi_role,
+                            reason=(
+                                f"BWI automatisch übernommen "
+                                f"über Invite von {inviter_member}"
+                            )
+                        )
+
+                        print(
+                            f"✅ BWI übernommen: "
+                            f"{inviter_member} → {member} "
+                            f"(Invite: {used_invite.code})"
+                        )
+
+                    except discord.Forbidden:
+
+                        print(
+                            f"❌ BWI konnte {member} "
+                            f"nicht gegeben werden."
+                        )
+
+                    except discord.HTTPException as e:
+
+                        print(
+                            f"❌ Discord-Fehler beim "
+                            f"Vergeben von BWI an {member}: {e}"
+                        )
 
     # ==================================================
-    # 1. ADMIN-NACHRICHT FÜR ROLLENVERGABE
+    # 2. DANACH ADMIN-NACHRICHT MIT AKTUELLEN ROLLEN
     # ==================================================
+
+    # Member nach möglicher BWI-Vergabe frisch laden,
+    # damit Text und Dropdown-Häkchen den neuen Stand sehen.
+    try:
+        member = await guild.fetch_member(member.id)
+    except discord.HTTPException:
+        pass
 
     admin_channel = guild.get_channel(
         ADMIN_ROLE_CHANNEL_ID
@@ -423,179 +585,6 @@ async def on_member_join(member):
                 f"Admin-Rollen-Menüs: {e}"
             )
 
-
-    # ==================================================
-    # 2. BWI INVITE-VERERBUNG
-    # ==================================================
-
-    try:
-
-        current_invites = await guild.invites()
-
-    except discord.Forbidden:
-
-        print(
-            f"❌ Invite-Erkennung bei {member} "
-            f"nicht möglich."
-        )
-        return
-
-    except discord.HTTPException as e:
-
-        print(
-            f"❌ Discord-Fehler beim Abrufen "
-            f"der Invites für {member}: {e}"
-        )
-        return
-
-
-    old_invites = invite_cache.get(
-        guild.id,
-        {}
-    )
-
-    changed_invites = []
-
-
-    for invite in current_invites:
-
-        old_uses = old_invites.get(
-            invite.code,
-            0
-        )
-
-        new_uses = invite.uses or 0
-
-        if new_uses > old_uses:
-            changed_invites.append(invite)
-
-
-    # Cache sofort aktualisieren
-    invite_cache[guild.id] = {
-        invite.code: invite.uses or 0
-        for invite in current_invites
-    }
-
-
-    if len(changed_invites) == 0:
-
-        print(
-            f"ℹ️ Join erkannt: {member} – "
-            f"Invite konnte nicht bestimmt werden."
-        )
-        return
-
-
-    if len(changed_invites) > 1:
-
-        print(
-            f"⚠️ Join von {member}: "
-            f"mehrere veränderte Invites erkannt."
-        )
-        return
-
-
-    used_invite = changed_invites[0]
-
-    inviter = used_invite.inviter
-
-
-    if inviter is None:
-
-        print(
-            f"ℹ️ Invite {used_invite.code} "
-            f"hat keinen erkennbaren Ersteller."
-        )
-        return
-
-
-    inviter_member = guild.get_member(
-        inviter.id
-    )
-
-
-    if inviter_member is None:
-
-        try:
-
-            inviter_member = await guild.fetch_member(
-                inviter.id
-            )
-
-        except (
-            discord.NotFound,
-            discord.Forbidden,
-            discord.HTTPException
-        ):
-
-            print(
-                f"ℹ️ Einladender {inviter} "
-                f"konnte nicht gefunden werden."
-            )
-            return
-
-
-    bwi_role = guild.get_role(
-        BWI_ROLE_ID
-    )
-
-
-    if bwi_role is None:
-
-        print(
-            f"❌ BWI-Rolle mit ID "
-            f"{BWI_ROLE_ID} wurde nicht gefunden."
-        )
-        return
-
-
-    if bwi_role not in inviter_member.roles:
-
-        print(
-            f"ℹ️ {member} wurde von "
-            f"{inviter_member} eingeladen. "
-            f"Kein BWI vorhanden."
-        )
-        return
-
-
-    if bwi_role in member.roles:
-
-        print(
-            f"ℹ️ {member} besitzt BWI bereits."
-        )
-        return
-
-
-    try:
-
-        await member.add_roles(
-            bwi_role,
-            reason=(
-                f"BWI automatisch übernommen "
-                f"über Invite von {inviter_member}"
-            )
-        )
-
-        print(
-            f"✅ BWI übernommen: "
-            f"{inviter_member} → {member} "
-            f"(Invite: {used_invite.code})"
-        )
-
-    except discord.Forbidden:
-
-        print(
-            f"❌ BWI konnte {member} "
-            f"nicht gegeben werden."
-        )
-
-    except discord.HTTPException as e:
-
-        print(
-            f"❌ Discord-Fehler beim "
-            f"Vergeben von BWI an {member}: {e}"
-        )
 # ==================================================
 
 
