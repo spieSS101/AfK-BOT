@@ -74,22 +74,13 @@ ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 # ============================================================
 
 ADMIN_ASSIGNABLE_ROLES = [
-    {
-        "label": "BWI",
-        "role_id": 1486613262953877645
-    },
-    {
-        "label": "Vanilla",
-        "role_id": 1486551681490747483
-    },
-    {
-        "label": "Abschiebeamt",
-        "role_id": 1486552799834673194
-    },
-    {
-        "label": "Asyl",
-        "role_id": 1486571017806811228
-    },
+    {"label": "BWI", "role_id": 1486613262953877645},
+    {"label": "Asyl", "role_id": 1486571017806811228},
+    {"label": "Vanilla", "role_id": 1486551681490747483},
+    {"label": "Jobcenter", "role_id": 1486553099475615856},
+    {"label": "Ratsmitglied", "role_id": 1486552582397759499},
+    {"label": "Abschiebeamt", "role_id": 1486552799834673194},
+    {"label": "Sounds und Nickname", "role_id": 1486554277697556480},
 ]
 
 # ============================================================
@@ -109,11 +100,44 @@ invite_cache = {}
 # ADMIN ROLLEN-MENÜ
 # ============================================================
 
+def get_managed_role_ids():
+    return {
+        role_data["role_id"]
+        for role_data in ADMIN_ASSIGNABLE_ROLES
+    }
+
+
+def get_managed_role_names(member):
+    names = []
+
+    for role_data in ADMIN_ASSIGNABLE_ROLES:
+        if any(role.id == role_data["role_id"] for role in member.roles):
+            names.append(role_data["label"])
+
+    return names
+
+
+def build_admin_role_message(member):
+    role_names = get_managed_role_names(member)
+    roles_text = ", ".join(role_names) if role_names else "Keine"
+
+    return (
+        f"👤 **Neuer Benutzer:** {member.mention}\n"
+        f"`{member}`\n"
+        f"**Aktuelle Rollen:** {roles_text}\n\n"
+        f"Welche Rolle(n) soll der Benutzer erhalten?"
+    )
+
+
 class RoleSelect(discord.ui.Select):
 
     def __init__(self, target_member):
 
         self.target_member = target_member
+        current_role_ids = {
+            role.id
+            for role in target_member.roles
+        }
 
         options = []
 
@@ -121,33 +145,26 @@ class RoleSelect(discord.ui.Select):
             options.append(
                 discord.SelectOption(
                     label=role_data["label"],
-                    value=str(role_data["role_id"])
+                    value=str(role_data["role_id"]),
+                    default=role_data["role_id"] in current_role_ids
                 )
             )
 
         super().__init__(
-            placeholder="Rolle(n) auswählen...",
-            min_values=1,
+            placeholder="Rolle(n) verwalten...",
+            min_values=0,
             max_values=len(options),
             options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
 
-        # Nur Administratoren dürfen das Menü benutzen
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
                 "❌ Du darfst dieses Menü nicht benutzen.",
                 ephemeral=True
             )
             return
-
-        # Die Auswahl aus dem Discord-Dropdown ist bereits bestätigt.
-        # Deshalb Rollen jetzt direkt vergeben – kein zweiter Bot-Button nötig.
-        selected_role_ids = [
-            int(role_id)
-            for role_id in self.values
-        ]
 
         member = interaction.guild.get_member(
             self.view.target_member_id
@@ -169,64 +186,86 @@ class RoleSelect(discord.ui.Select):
                 )
                 return
 
-        roles_to_add = []
+        selected_role_ids = {
+            int(role_id)
+            for role_id in self.values
+        }
 
-        for role_id in selected_role_ids:
-            role = interaction.guild.get_role(role_id)
+        managed_role_ids = get_managed_role_ids()
 
-            if role is not None and role not in member.roles:
-                roles_to_add.append(role)
+        current_managed_role_ids = {
+            role.id
+            for role in member.roles
+            if role.id in managed_role_ids
+        }
 
-        if not roles_to_add:
-            await interaction.response.send_message(
-                "ℹ️ Der Benutzer besitzt die ausgewählten Rollen bereits.",
-                ephemeral=True
-            )
-            return
+        role_ids_to_add = selected_role_ids - current_managed_role_ids
+        role_ids_to_remove = current_managed_role_ids - selected_role_ids
+
+        roles_to_add = [
+            interaction.guild.get_role(role_id)
+            for role_id in role_ids_to_add
+        ]
+        roles_to_add = [
+            role for role in roles_to_add
+            if role is not None
+        ]
+
+        roles_to_remove = [
+            interaction.guild.get_role(role_id)
+            for role_id in role_ids_to_remove
+        ]
+        roles_to_remove = [
+            role for role in roles_to_remove
+            if role is not None
+        ]
 
         try:
-            await member.add_roles(
-                *roles_to_add,
-                reason=(
-                    f"Admin-Rollenvergabe durch "
-                    f"{interaction.user}"
+            if roles_to_add:
+                await member.add_roles(
+                    *roles_to_add,
+                    reason=f"Admin-Rollenverwaltung durch {interaction.user}"
                 )
-            )
+
+            if roles_to_remove:
+                await member.remove_roles(
+                    *roles_to_remove,
+                    reason=f"Admin-Rollenverwaltung durch {interaction.user}"
+                )
 
         except discord.Forbidden:
             await interaction.response.send_message(
-                "❌ Der Bot darf mindestens eine dieser Rollen "
-                "nicht vergeben. Prüfe die Rollenreihenfolge.",
+                "❌ Der Bot darf mindestens eine dieser Rollen nicht verwalten. "
+                "Prüfe die Rollenreihenfolge.",
                 ephemeral=True
             )
             return
 
         except discord.HTTPException:
             await interaction.response.send_message(
-                "❌ Discord-Fehler beim Vergeben der Rollen.",
+                "❌ Discord-Fehler beim Ändern der Rollen.",
                 ephemeral=True
             )
             return
 
-        role_names = ", ".join(
-            role.name
-            for role in roles_to_add
-        )
+        # Member neu laden, damit Anzeige und Häkchen sicher aktuell sind.
+        try:
+            member = await interaction.guild.fetch_member(member.id)
+        except discord.HTTPException:
+            pass
 
-        # Gleiche abschließende Bestätigung wie bisher.
+        # Nur dieselbe ursprüngliche Nachricht aktualisieren:
+        # keine Erfolgs-/Auswahl-Benachrichtigung und das Dropdown bleibt erhalten.
         await interaction.response.edit_message(
-            content=(
-                f"✅ Rollen für {member.mention} vergeben:\n"
-                f"**{role_names}**"
-            ),
-            view=None
+            content=build_admin_role_message(member),
+            view=MemberRoleView(member)
         )
 
 
 class MemberRoleView(discord.ui.View):
 
     def __init__(self, target_member):
-        # 24 Stunden Zeit für die Rollenvergabe
+        # 24 Stunden Zeit für die Rollenverwaltung
         super().__init__(timeout=86400)
 
         self.target_member_id = target_member.id
@@ -366,11 +405,7 @@ async def on_member_join(member):
         try:
 
             await admin_channel.send(
-                content=(
-                    f"👤 **Neuer Benutzer:** {member.mention}\n"
-                    f"`{member}`\n\n"
-                    f"Welche Rolle(n) soll der Benutzer erhalten?"
-                ),
+                content=build_admin_role_message(member),
                 view=MemberRoleView(member)
             )
 
