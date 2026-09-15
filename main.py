@@ -148,9 +148,11 @@ class RoleSelect(discord.ui.Select):
             for role_id in self.values
         ]
 
-        # Auswahl wurde gespeichert; keine zusätzliche Nachricht erzeugen.
-        # Dadurch bleibt nur der ursprüngliche Bestätigen-Button sichtbar.
-        await interaction.response.defer()
+        # Auswahl direkt in der ursprünglichen Nachricht übernehmen.
+        # Wichtig: edit_message bestätigt die Select-Interaktion, ohne
+        # eine zweite (ephemere) Nachricht mit eigener Komponentenansicht
+        # zu erzeugen.
+        await interaction.response.edit_message(view=self.view)
 
 
 class ConfirmRolesButton(discord.ui.Button):
