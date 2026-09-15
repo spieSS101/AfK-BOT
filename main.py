@@ -75,17 +75,21 @@ ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 
 ADMIN_ASSIGNABLE_ROLES = [
     {
+        "label": "BWI",
+        "role_id": 1486613262953877645
+    },
+    {
         "label": "Vanilla",
         "role_id": 1486551681490747483
+    },
+    {
+        "label": "Abschiebeamt",
+        "role_id": 1486552799834673194
     },
     {
         "label": "Asyl",
         "role_id": 1486571017806811228
     },
-    {
-        "label": "Abschiebeamt",
-        "role_id": 1486552799834673194
-    }
 ]
 
 # ============================================================
