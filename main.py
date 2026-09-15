@@ -58,6 +58,20 @@ BWI_ROLE_ID = 1486613262953877645
 ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 
 
+# Voice-Benachrichtigungen
+VOICE_NOTIFICATION_CHANNEL_ID = 1506982204700360767
+SPIESS_ROLE_ID = 1486560941368803389
+
+BUNKER_VOICE_CHANNEL_ID = 1486574554900987986
+JERKING_VOICE_CHANNEL_ID = 1529300838688882812
+
+BUNKER_USER_ID = int(os.getenv("BUNKER_USER_ID", "0"))
+JERKING_USER_ID = int(os.getenv("JERKING_USER_ID", "0"))
+
+BUNKER_MESSAGE = "Bunkerzeit"
+JERKING_MESSAGE = "Jerking Hours"
+
+
 # ============================================================
 # ROLLEN FÜR DAS ADMIN-MENÜ
 #
@@ -588,6 +602,77 @@ async def on_member_join(member):
 # ==================================================
 
 
+# ================== VOICE-BENACHRICHTIGUNGEN ==================
+def channel_has_spiess(voice_channel):
+    return any(
+        any(role.id == SPIESS_ROLE_ID for role in channel_member.roles)
+        for channel_member in voice_channel.members
+        if not channel_member.bot
+    )
+
+
+async def send_voice_notification(guild, message_text):
+    notification_channel = guild.get_channel(
+        VOICE_NOTIFICATION_CHANNEL_ID
+    )
+
+    if notification_channel is None:
+        print(
+            f"❌ Benachrichtigungs-Channel mit ID "
+            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
+        )
+        return
+
+    try:
+        await notification_channel.send(message_text)
+
+    except discord.Forbidden:
+        print(
+            "❌ Bot kann keine Voice-Benachrichtigung senden."
+        )
+
+    except discord.HTTPException as e:
+        print(
+            f"❌ Fehler beim Senden der Voice-Benachrichtigung: {e}"
+        )
+
+
+async def delete_voice_notifications(guild, message_text):
+    notification_channel = guild.get_channel(
+        VOICE_NOTIFICATION_CHANNEL_ID
+    )
+
+    if notification_channel is None:
+        print(
+            f"❌ Benachrichtigungs-Channel mit ID "
+            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
+        )
+        return
+
+    try:
+        async for message in notification_channel.history(limit=None):
+            if (
+                message.author.id == bot.user.id
+                and message.content == message_text
+            ):
+                try:
+                    await message.delete()
+                except discord.NotFound:
+                    pass
+
+    except discord.Forbidden:
+        print(
+            "❌ Bot kann die Voice-Benachrichtigungen "
+            "nicht lesen oder löschen."
+        )
+
+    except discord.HTTPException as e:
+        print(
+            f"❌ Fehler beim Löschen der Voice-Benachrichtigungen: {e}"
+        )
+# ===============================================================
+
+
 # ================== VOICE STATE ==================
 @bot.event
 async def on_voice_state_update(
@@ -598,6 +683,65 @@ async def on_voice_state_update(
 
     if member.bot:
         return
+
+    # ==================================================
+    # VOICE-BENACHRICHTIGUNGEN
+    # Nur bei einem echten Channel-Wechsel / Join prüfen.
+    # ==================================================
+    joined_channel = (
+        after.channel is not None
+        and (
+            before.channel is None
+            or before.channel.id != after.channel.id
+        )
+    )
+
+    if joined_channel:
+
+        # BUNKER:
+        # Überwachter User joint -> nur melden, wenn noch kein Spiess drin ist.
+        if (
+            member.id == BUNKER_USER_ID
+            and after.channel.id == BUNKER_VOICE_CHANNEL_ID
+        ):
+            if not channel_has_spiess(after.channel):
+                await send_voice_notification(
+                    member.guild,
+                    BUNKER_MESSAGE
+                )
+
+        # JERKING:
+        # Überwachter User joint -> nur melden, wenn noch kein Spiess drin ist.
+        if (
+            member.id == JERKING_USER_ID
+            and after.channel.id == JERKING_VOICE_CHANNEL_ID
+        ):
+            if not channel_has_spiess(after.channel):
+                await send_voice_notification(
+                    member.guild,
+                    JERKING_MESSAGE
+                )
+
+        # Wenn ein Spiess einen der beiden Channels betritt,
+        # nur die Nachrichten dieses Channels löschen.
+        member_is_spiess = any(
+            role.id == SPIESS_ROLE_ID
+            for role in member.roles
+        )
+
+        if member_is_spiess:
+
+            if after.channel.id == BUNKER_VOICE_CHANNEL_ID:
+                await delete_voice_notifications(
+                    member.guild,
+                    BUNKER_MESSAGE
+                )
+
+            elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
+                await delete_voice_notifications(
+                    member.guild,
+                    JERKING_MESSAGE
+                )
 
     now = datetime.datetime.now(
         datetime.UTC
