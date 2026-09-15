@@ -49,7 +49,7 @@ INACTIVITY_TIME = 45 * 60
 
 # WICHTIG:
 # Hier die echte ID deiner BWI-Rolle eintragen.
-BWI_ROLE_ID = 123456789012345678
+BWI_ROLE_ID = 1486613262953877645
 # ==================================================
 
 
