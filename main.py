@@ -142,55 +142,21 @@ class RoleSelect(discord.ui.Select):
             )
             return
 
-        # Auswahl speichern
-        self.view.selected_role_ids = [
+        # Die Auswahl aus dem Discord-Dropdown ist bereits bestätigt.
+        # Deshalb Rollen jetzt direkt vergeben – kein zweiter Bot-Button nötig.
+        selected_role_ids = [
             int(role_id)
             for role_id in self.values
         ]
 
-        # Auswahl direkt in der ursprünglichen Nachricht übernehmen.
-        # Wichtig: edit_message bestätigt die Select-Interaktion, ohne
-        # eine zweite (ephemere) Nachricht mit eigener Komponentenansicht
-        # zu erzeugen.
-        await interaction.response.edit_message(view=self.view)
-
-
-class ConfirmRolesButton(discord.ui.Button):
-
-    def __init__(self):
-        super().__init__(
-            label="Bestätigen",
-            style=discord.ButtonStyle.success,
-            emoji="✅"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-
-        # Nur Administratoren dürfen bestätigen
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ Du darfst diese Rollen nicht vergeben.",
-                ephemeral=True
-            )
-            return
-
-        view = self.view
-
-        if not view.selected_role_ids:
-            await interaction.response.send_message(
-                "❌ Bitte zuerst mindestens eine Rolle auswählen.",
-                ephemeral=True
-            )
-            return
-
         member = interaction.guild.get_member(
-            view.target_member_id
+            self.view.target_member_id
         )
 
         if member is None:
             try:
                 member = await interaction.guild.fetch_member(
-                    view.target_member_id
+                    self.view.target_member_id
                 )
             except (
                 discord.NotFound,
@@ -205,8 +171,7 @@ class ConfirmRolesButton(discord.ui.Button):
 
         roles_to_add = []
 
-        for role_id in view.selected_role_ids:
-
+        for role_id in selected_role_ids:
             role = interaction.guild.get_role(role_id)
 
             if role is not None and role not in member.roles:
@@ -248,7 +213,7 @@ class ConfirmRolesButton(discord.ui.Button):
             for role in roles_to_add
         )
 
-        # Ursprüngliche Nachricht aktualisieren
+        # Gleiche abschließende Bestätigung wie bisher.
         await interaction.response.edit_message(
             content=(
                 f"✅ Rollen für {member.mention} vergeben:\n"
@@ -265,14 +230,9 @@ class MemberRoleView(discord.ui.View):
         super().__init__(timeout=86400)
 
         self.target_member_id = target_member.id
-        self.selected_role_ids = []
 
         self.add_item(
             RoleSelect(target_member)
-        )
-
-        self.add_item(
-            ConfirmRolesButton()
         )
 
 
