@@ -75,11 +75,11 @@ ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 
 ADMIN_ASSIGNABLE_ROLES = [
     {"label": "BWI", "role_id": 1486613262953877645},
-    {"label": "Asyl", "role_id": 1486571017806811228},
     {"label": "Vanilla", "role_id": 1486551681490747483},
-    {"label": "Jobcenter", "role_id": 1486553099475615856},
-    {"label": "Ratsmitglied", "role_id": 1486552582397759499},
+    {"label": "Asyl", "role_id": 1486571017806811228},
     {"label": "Abschiebeamt", "role_id": 1486552799834673194},
+    {"label": "Ratsmitglied", "role_id": 1486552582397759499},
+    {"label": "Jobcenter", "role_id": 1486553099475615856},
     {"label": "Sounds und Nickname", "role_id": 1486554277697556480},
 ]
 
