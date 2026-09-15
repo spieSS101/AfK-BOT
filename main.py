@@ -148,18 +148,9 @@ class RoleSelect(discord.ui.Select):
             for role_id in self.values
         ]
 
-        selected_names = []
-
-        for role_id in self.view.selected_role_ids:
-            role = interaction.guild.get_role(role_id)
-
-            if role:
-                selected_names.append(role.name)
-
-        await interaction.response.send_message(
-            "Ausgewählt: " + ", ".join(selected_names),
-            ephemeral=True
-        )
+        # Auswahl wurde gespeichert; keine zusätzliche Nachricht erzeugen.
+        # Dadurch bleibt nur der ursprüngliche Bestätigen-Button sichtbar.
+        await interaction.response.defer()
 
 
 class ConfirmRolesButton(discord.ui.Button):
