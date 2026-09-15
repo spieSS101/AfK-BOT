@@ -18,7 +18,7 @@ app = Flask(__name__)
 @app.route('/')
 @app.route('/ping')
 def ping():
-    return "AFK Bot is alive!", 200
+    return "Bot is alive", 200
 
 def run_webserver():
     app.run(host='0.0.0.0', port=8080)
