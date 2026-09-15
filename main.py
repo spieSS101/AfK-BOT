@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 import os
+import asyncio
 import threading
 from flask import Flask
 from dotenv import load_dotenv
@@ -71,6 +72,10 @@ JERKING_USER_ID = int(os.getenv("JERKING_USER_ID", "0"))
 BUNKER_MESSAGE = "Bunkerzeit"
 JERKING_MESSAGE = "Jerking Hours"
 
+# BWI-Voice-Bereich (Discord-Kategorie)
+BWI_VOICE_CATEGORY_ID = 1486612928584093706
+BWI_NOTIFICATION_PREFIX = "BWI-Bereich beigetreten"
+
 
 # ============================================================
 # ROLLEN FÜR DAS ADMIN-MENÜ
@@ -108,6 +113,15 @@ last_active = {}
 # ================== INVITE CACHE ==================
 invite_cache = {}
 # ==================================================
+
+
+# ================== VOICE-BENACHRICHTIGUNGS-TIMER ==================
+# Pro Benachrichtigung kann ein eigener 3-Minuten-Timer laufen.
+voice_notification_timers = {
+    BUNKER_VOICE_CHANNEL_ID: set(),
+    JERKING_VOICE_CHANNEL_ID: set(),
+}
+# ===================================================================
 
 
 # ============================================================
@@ -317,6 +331,14 @@ async def on_ready():
 
     if not check_inactivity.is_running():
         check_inactivity.start()
+
+    # Persistente Bestätigen-Buttons registrieren.
+    # Dadurch funktionieren bereits gesendete Buttons auch nach einem Bot-Neustart.
+    if not getattr(bot, "_notification_views_registered", False):
+        bot.add_view(ClearNotificationView("bunker"))
+        bot.add_view(ClearNotificationView("jerking"))
+        bot.add_view(ClearNotificationView("bwi"))
+        bot._notification_views_registered = True
 
     # Aktuelle Invite-Zähler aller Server laden
     for guild in bot.guilds:
@@ -611,33 +633,21 @@ def channel_has_spiess(voice_channel):
     )
 
 
-async def send_voice_notification(guild, message_text):
-    notification_channel = guild.get_channel(
-        VOICE_NOTIFICATION_CHANNEL_ID
+def member_is_spiess(member):
+    return any(
+        role.id == SPIESS_ROLE_ID
+        for role in member.roles
     )
 
-    if notification_channel is None:
-        print(
-            f"❌ Benachrichtigungs-Channel mit ID "
-            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
-        )
-        return
 
-    try:
-        await notification_channel.send(message_text)
-
-    except discord.Forbidden:
-        print(
-            "❌ Bot kann keine Voice-Benachrichtigung senden."
-        )
-
-    except discord.HTTPException as e:
-        print(
-            f"❌ Fehler beim Senden der Voice-Benachrichtigung: {e}"
-        )
+def is_bwi_voice_channel(channel):
+    return (
+        channel is not None
+        and channel.category_id == BWI_VOICE_CATEGORY_ID
+    )
 
 
-async def delete_voice_notifications(guild, message_text):
+async def delete_voice_notifications(guild, notification_type):
     notification_channel = guild.get_channel(
         VOICE_NOTIFICATION_CHANNEL_ID
     )
@@ -651,10 +661,26 @@ async def delete_voice_notifications(guild, message_text):
 
     try:
         async for message in notification_channel.history(limit=None):
-            if (
-                message.author.id == bot.user.id
-                and message.content == message_text
-            ):
+            if message.author.id != bot.user.id:
+                continue
+
+            should_delete = False
+
+            if notification_type == "bunker":
+                should_delete = message.content == BUNKER_MESSAGE
+
+            elif notification_type == "jerking":
+                should_delete = message.content == JERKING_MESSAGE
+
+            elif notification_type == "bwi":
+                should_delete = (
+                    message.content.startswith("<@")
+                    and message.content.endswith(
+                        f" ist dem {BWI_NOTIFICATION_PREFIX}"
+                    )
+                )
+
+            if should_delete:
                 try:
                     await message.delete()
                 except discord.NotFound:
@@ -670,6 +696,150 @@ async def delete_voice_notifications(guild, message_text):
         print(
             f"❌ Fehler beim Löschen der Voice-Benachrichtigungen: {e}"
         )
+
+
+class ClearNotificationButton(discord.ui.Button):
+    def __init__(self, notification_type):
+        labels = {
+            "bunker": "Bunker bestätigen",
+            "jerking": "Jerking bestätigen",
+            "bwi": "BWI bestätigen",
+        }
+
+        super().__init__(
+            label=labels[notification_type],
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"clear_voice_notifications:{notification_type}"
+        )
+
+        self.notification_type = notification_type
+
+    async def callback(self, interaction: discord.Interaction):
+        # Die beiden Minuten-Timer müssen beim manuellen Bestätigen
+        # ebenfalls beendet werden, sonst käme die Meldung erneut.
+        if self.notification_type == "bunker":
+            cancel_voice_notification_timers(
+                BUNKER_VOICE_CHANNEL_ID
+            )
+
+        elif self.notification_type == "jerking":
+            cancel_voice_notification_timers(
+                JERKING_VOICE_CHANNEL_ID
+            )
+
+        await interaction.response.defer()
+
+        await delete_voice_notifications(
+            interaction.guild,
+            self.notification_type
+        )
+
+
+class ClearNotificationView(discord.ui.View):
+    def __init__(self, notification_type):
+        # timeout=None + feste custom_id = persistenter Button
+        super().__init__(timeout=None)
+        self.add_item(
+            ClearNotificationButton(notification_type)
+        )
+
+
+async def send_voice_notification(
+    guild,
+    message_text,
+    notification_type
+):
+    notification_channel = guild.get_channel(
+        VOICE_NOTIFICATION_CHANNEL_ID
+    )
+
+    if notification_channel is None:
+        print(
+            f"❌ Benachrichtigungs-Channel mit ID "
+            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
+        )
+        return
+
+    try:
+        await notification_channel.send(
+            message_text,
+            view=ClearNotificationView(notification_type)
+        )
+
+    except discord.Forbidden:
+        print(
+            "❌ Bot kann keine Voice-Benachrichtigung senden."
+        )
+
+    except discord.HTTPException as e:
+        print(
+            f"❌ Fehler beim Senden der Voice-Benachrichtigung: {e}"
+        )
+
+
+async def repeat_voice_notification_after_delay(
+    guild,
+    voice_channel_id,
+    message_text,
+    notification_type
+):
+    try:
+        while True:
+            # Nach jeder Meldung 1 Minute warten.
+            await asyncio.sleep(60)
+
+            # Solange kein Spiess den zugehörigen Voice-Channel
+            # betritt und den Task abbricht, erneut benachrichtigen.
+            await send_voice_notification(
+                guild,
+                message_text,
+                notification_type
+            )
+
+    except asyncio.CancelledError:
+        return
+
+
+def start_voice_notification_timer(
+    guild,
+    voice_channel_id,
+    message_text,
+    notification_type
+):
+    task = asyncio.create_task(
+        repeat_voice_notification_after_delay(
+            guild,
+            voice_channel_id,
+            message_text,
+            notification_type
+        )
+    )
+
+    voice_notification_timers.setdefault(
+        voice_channel_id,
+        set()
+    ).add(task)
+
+    task.add_done_callback(
+        lambda finished_task: voice_notification_timers
+        .get(voice_channel_id, set())
+        .discard(finished_task)
+    )
+
+
+def cancel_voice_notification_timers(voice_channel_id):
+    for task in list(
+        voice_notification_timers.get(
+            voice_channel_id,
+            set()
+        )
+    ):
+        task.cancel()
+
+    voice_notification_timers.get(
+        voice_channel_id,
+        set()
+    ).clear()
 # ===============================================================
 
 
@@ -686,7 +856,6 @@ async def on_voice_state_update(
 
     # ==================================================
     # VOICE-BENACHRICHTIGUNGEN
-    # Nur bei einem echten Channel-Wechsel / Join prüfen.
     # ==================================================
     joined_channel = (
         after.channel is not None
@@ -698,8 +867,11 @@ async def on_voice_state_update(
 
     if joined_channel:
 
-        # BUNKER:
-        # Überwachter User joint -> nur melden, wenn noch kein Spiess drin ist.
+        is_spiess = member_is_spiess(member)
+
+        # --------------------------------------------------
+        # BUNKER
+        # --------------------------------------------------
         if (
             member.id == BUNKER_USER_ID
             and after.channel.id == BUNKER_VOICE_CHANNEL_ID
@@ -707,11 +879,19 @@ async def on_voice_state_update(
             if not channel_has_spiess(after.channel):
                 await send_voice_notification(
                     member.guild,
-                    BUNKER_MESSAGE
+                    BUNKER_MESSAGE,
+                    "bunker"
+                )
+                start_voice_notification_timer(
+                    member.guild,
+                    BUNKER_VOICE_CHANNEL_ID,
+                    BUNKER_MESSAGE,
+                    "bunker"
                 )
 
-        # JERKING:
-        # Überwachter User joint -> nur melden, wenn noch kein Spiess drin ist.
+        # --------------------------------------------------
+        # JERKING
+        # --------------------------------------------------
         if (
             member.id == JERKING_USER_ID
             and after.channel.id == JERKING_VOICE_CHANNEL_ID
@@ -719,28 +899,65 @@ async def on_voice_state_update(
             if not channel_has_spiess(after.channel):
                 await send_voice_notification(
                     member.guild,
-                    JERKING_MESSAGE
+                    JERKING_MESSAGE,
+                    "jerking"
+                )
+                start_voice_notification_timer(
+                    member.guild,
+                    JERKING_VOICE_CHANNEL_ID,
+                    JERKING_MESSAGE,
+                    "jerking"
                 )
 
-        # Wenn ein Spiess einen der beiden Channels betritt,
-        # nur die Nachrichten dieses Channels löschen.
-        member_is_spiess = any(
-            role.id == SPIESS_ROLE_ID
-            for role in member.roles
-        )
-
-        if member_is_spiess:
+        # Spiess betritt Bunker/Jerking:
+        # Timer stoppen und nur die zugehörigen Meldungen löschen.
+        if is_spiess:
 
             if after.channel.id == BUNKER_VOICE_CHANNEL_ID:
+                cancel_voice_notification_timers(
+                    BUNKER_VOICE_CHANNEL_ID
+                )
                 await delete_voice_notifications(
                     member.guild,
-                    BUNKER_MESSAGE
+                    "bunker"
                 )
 
             elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
+                cancel_voice_notification_timers(
+                    JERKING_VOICE_CHANNEL_ID
+                )
                 await delete_voice_notifications(
                     member.guild,
-                    JERKING_MESSAGE
+                    "jerking"
+                )
+
+        # --------------------------------------------------
+        # BWI-BEREICH
+        # Nur beim Eintritt von außerhalb in die BWI-Kategorie.
+        # Wechsel zwischen zwei Voice-Channels derselben Kategorie
+        # erzeugt keine zusätzliche Meldung.
+        # --------------------------------------------------
+        entered_bwi_area = (
+            is_bwi_voice_channel(after.channel)
+            and not is_bwi_voice_channel(before.channel)
+        )
+
+        if entered_bwi_area:
+
+            if is_spiess:
+                # Ein Spiess betritt den BWI-Bereich:
+                # alle offenen BWI-Meldungen auf einmal löschen.
+                await delete_voice_notifications(
+                    member.guild,
+                    "bwi"
+                )
+
+            else:
+                # Keine Wiederholung / kein Minuten-Timer für BWI.
+                await send_voice_notification(
+                    member.guild,
+                    f"{member.mention} ist dem BWI-Bereich beigetreten",
+                    "bwi"
                 )
 
     now = datetime.datetime.now(
