@@ -6,7 +6,6 @@ import threading
 from flask import Flask
 from dotenv import load_dotenv
 
-
 # ================== .ENV LADEN ==================
 load_dotenv("/opt/discordbot/.env")
 # ================================================
@@ -15,16 +14,13 @@ load_dotenv("/opt/discordbot/.env")
 # ================== KLEINER STATUS-WEBSERVER ==================
 app = Flask(__name__)
 
-
 @app.route('/')
 @app.route('/ping')
 def ping():
     return "AFK Bot is alive!", 200
 
-
 def run_webserver():
     app.run(host='0.0.0.0', port=8080)
-
 
 threading.Thread(target=run_webserver, daemon=True).start()
 # ============================================================
@@ -53,7 +49,7 @@ INACTIVITY_TIME = 45 * 60
 
 # WICHTIG:
 # Hier die echte ID deiner BWI-Rolle eintragen.
-BWI_ROLE_ID = 1486613262953877645
+BWI_ROLE_ID = 123456789012345678
 # ==================================================
 
 
@@ -110,11 +106,21 @@ async def on_ready():
                 for invite in invites
             }
 
-        except discord.Forbidden:
-            pass
+            print(
+                f"🔗 Invite-Cache geladen: "
+                f"{guild.name} ({len(invites)} Invites)"
+            )
 
-        except discord.HTTPException:
-            pass
+        except discord.Forbidden:
+            print(
+                f"❌ Invite-Cache für {guild.name} konnte nicht geladen werden: "
+                f"fehlende Berechtigung."
+            )
+
+        except discord.HTTPException as e:
+            print(
+                f"❌ Fehler beim Laden der Invites für {guild.name}: {e}"
+            )
 # ================================================
 
 
@@ -128,6 +134,11 @@ async def on_invite_create(invite):
         invite_cache[invite.guild.id] = {}
 
     invite_cache[invite.guild.id][invite.code] = invite.uses or 0
+
+    print(
+        f"🔗 Neuer Invite registriert: {invite.code} "
+        f"auf {invite.guild.name}"
+    )
 # ==================================================
 
 
@@ -141,6 +152,11 @@ async def on_invite_delete(invite):
 
     if guild_cache is not None:
         guild_cache.pop(invite.code, None)
+
+    print(
+        f"🗑️ Invite entfernt: {invite.code} "
+        f"auf {invite.guild.name}"
+    )
 # ======================================================
 
 
@@ -158,9 +174,17 @@ async def on_member_join(member):
         current_invites = await guild.invites()
 
     except discord.Forbidden:
+        print(
+            f"❌ Invite-Erkennung bei {member} nicht möglich: "
+            f"Bot hat keine ausreichenden Rechte."
+        )
         return
 
-    except discord.HTTPException:
+    except discord.HTTPException as e:
+        print(
+            f"❌ Discord-Fehler beim Abrufen der Invites "
+            f"für {member}: {e}"
+        )
         return
 
     old_invites = invite_cache.get(guild.id, {})
@@ -184,6 +208,10 @@ async def on_member_join(member):
 
     # Kein Invite konnte erkannt werden
     if len(changed_invites) == 0:
+        print(
+            f"ℹ️ Join erkannt: {member} – "
+            f"verwendeter Invite konnte nicht bestimmt werden."
+        )
         return
 
     # Mehrere Invites haben sich gleichzeitig verändert.
@@ -191,6 +219,11 @@ async def on_member_join(member):
     # Aus Sicherheitsgründen vergeben wir dann KEINE BWI-Rolle,
     # statt möglicherweise dem falschen User BWI zu geben.
     if len(changed_invites) > 1:
+        print(
+            f"⚠️ Join von {member}: "
+            f"mehrere veränderte Invites erkannt. "
+            f"BWI wird aus Sicherheitsgründen nicht vergeben."
+        )
         return
 
     used_invite = changed_invites[0]
@@ -199,6 +232,10 @@ async def on_member_join(member):
     inviter = used_invite.inviter
 
     if inviter is None:
+        print(
+            f"ℹ️ Invite {used_invite.code} wurde benutzt, "
+            f"aber der Ersteller konnte nicht erkannt werden."
+        )
         return
 
     # Discord-Member-Objekt des Einladenden holen
@@ -210,21 +247,37 @@ async def on_member_join(member):
             inviter_member = await guild.fetch_member(inviter.id)
 
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            print(
+                f"ℹ️ Einladender {inviter} konnte auf dem Server "
+                f"nicht gefunden werden."
+            )
             return
 
     # BWI-Rolle suchen
     bwi_role = guild.get_role(BWI_ROLE_ID)
 
     if bwi_role is None:
+        print(
+            f"❌ BWI-Rolle mit ID {BWI_ROLE_ID} "
+            f"wurde nicht gefunden."
+        )
         return
 
     # Hat der EINLADENDE aktuell BWI?
     if bwi_role not in inviter_member.roles:
+        print(
+            f"ℹ️ {member} wurde von {inviter_member} eingeladen. "
+            f"{inviter_member} besitzt jedoch kein BWI → "
+            f"keine Rolle vergeben."
+        )
         return
 
     # Falls der neue User wider Erwarten bereits BWI besitzt,
     # nichts doppelt machen.
     if bwi_role in member.roles:
+        print(
+            f"ℹ️ {member} besitzt BWI bereits."
+        )
         return
 
     # BWI an den neuen User KOPIEREN.
@@ -240,11 +293,23 @@ async def on_member_join(member):
             )
         )
 
-    except discord.Forbidden:
-        pass
+        print(
+            f"✅ BWI übernommen: "
+            f"{inviter_member} → {member} "
+            f"(Invite: {used_invite.code})"
+        )
 
-    except discord.HTTPException:
-        pass
+    except discord.Forbidden:
+        print(
+            f"❌ BWI konnte {member} nicht gegeben werden. "
+            f"Prüfe Rollenreihenfolge und 'Rollen verwalten'."
+        )
+
+    except discord.HTTPException as e:
+        print(
+            f"❌ Discord-Fehler beim Vergeben von BWI "
+            f"an {member}: {e}"
+        )
 # ==================================================
 
 
@@ -327,8 +392,16 @@ async def check_inactivity():
                     try:
                         await member.move_to(turkey_channel)
 
-                    except Exception:
-                        pass
+                        print(
+                            f"→ {member.name} wurde in die Türkei geschoben "
+                            f"(inaktiv seit {inaktiv_seit/60:.0f} min)"
+                        )
+
+                    except Exception as e:
+                        print(
+                            f"Fehler beim Verschieben "
+                            f"von {member.name}: {e}"
+                        )
 # ==================================================
 
 
