@@ -1211,7 +1211,7 @@ async def send_jerking_target_dm(content, message_type):
 
 def build_random_jerking_reminder():
     return (
-        "Wie kannst du den spieSS nur so lange warten lassen, du "
+        "Wie kannst du spieSS so lange warten lassen, du "
         f"{random.choice(ADJEKTIVE)} {random.choice(NOMEN)}💔"
     )
 
@@ -1456,6 +1456,32 @@ async def on_voice_state_update(
 
     if left_jerking_target and not spiess_is_waiting_in_jerking_target(member.guild):
         cancel_jerking_target_dm_task()
+        await delete_jerking_target_dm_messages()
+
+    # Wenn der letzte Spiess den Führerbunker verlässt:
+    # auch eventuell gespeicherte private Nachrichten an BUNKER_USER_ID löschen.
+    left_bunker_private_target = (
+        before.channel is not None
+        and before.channel.id == BUNKER_VOICE_CHANNEL_ID
+        and (after.channel is None or after.channel.id != BUNKER_VOICE_CHANNEL_ID)
+        and member_is_spiess(member)
+    )
+
+    if left_bunker_private_target:
+        bunker_channel = member.guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
+        if bunker_channel is not None and not channel_has_spiess(bunker_channel):
+            # Bestehende private Spiess-Gruppenmeldungen ebenfalls aufräumen.
+            await delete_private_dm_group("bunker")
+
+            # Falls aus der älteren Bunker-Zieluser-Logik noch Nachrichten
+            # in bunker_dm_messages gespeichert sind, diese ebenfalls löschen.
+            messages = list(bunker_dm_messages)
+            bunker_dm_messages.clear()
+            for message in messages:
+                try:
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
 
     now = datetime.datetime.now(
         datetime.UTC
