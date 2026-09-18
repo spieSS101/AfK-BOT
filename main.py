@@ -80,6 +80,23 @@ BUNKER_DM_INTERVAL = 30
 BWI_VOICE_CATEGORY_ID = 1486612928584093706
 BWI_NOTIFICATION_PREFIX = "BWI-Bereich beigetreten"
 
+BWI_VOICE_CHANNEL_IDS = {
+    1486936046393495582: "Zockerstube",
+    1486613172126355546: "Workingstation",
+    1486613053582868520: "Kaminecke",
+}
+
+# Private DMs für alle Accounts mit der Spiess-Rolle.
+# Gespeichert pro Empfänger und Benachrichtigungsgruppe.
+private_dm_messages = {
+    "bunker": {},
+    "jerking": {},
+    "bwi": {},
+}
+
+# BWI: pro Spiess-Empfänger und beobachtetem User genau eine aktuelle DM.
+bwi_user_dm_messages = {}
+
 
 # ============================================================
 # ROLLEN FÜR DAS ADMIN-MENÜ
@@ -349,7 +366,9 @@ async def on_ready():
         bot.add_view(ClearNotificationView("bunker"))
         bot.add_view(ClearNotificationView("jerking"))
         bot.add_view(ClearNotificationView("bwi"))
-        bot.add_view(BunkerDMView())
+        bot.add_view(PrivateVoiceDMView("bunker", BUNKER_VOICE_CHANNEL_ID))
+        bot.add_view(PrivateVoiceDMView("jerking", JERKING_VOICE_CHANNEL_ID))
+        bot.add_view(BWIPrivateDMView(BWI_VOICE_CHANNEL_IDS[1486613172126355546], 1486613172126355546))
         bot._notification_views_registered = True
 
     # Aktuelle Invite-Zähler aller Server laden
@@ -855,196 +874,159 @@ def cancel_voice_notification_timers(voice_channel_id):
 # ===============================================================
 
 
-# ================== PRIVATE BUNKER-DM FUNKTIONEN ==================
-def get_bunker_channel(guild):
-    channel = guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
-    return channel if isinstance(channel, discord.VoiceChannel) else None
+# ================== PRIVATE VOICE-DM FUNKTIONEN ==================
+async def get_spiess_members(guild):
+    return [
+        m for m in guild.members
+        if not m.bot and member_is_spiess(m)
+    ]
 
 
-def bunker_has_spiess(guild):
-    channel = get_bunker_channel(guild)
-    return channel is not None and channel_has_spiess(channel)
+async def delete_private_dm_group(notification_type):
+    """
+    Globales Aufräumen für alle Spiess-Accounts:
+    Drückt EIN Spiess auf "Jetzt nicht" / "Nicht jetzt",
+    werden alle noch gespeicherten privaten DMs dieser Gruppe
+    bei ALLEN Spiess-Accounts gelöscht.
+    """
+    messages = []
 
+    # Alle gespeicherten DMs dieser Gruppe von allen Empfängern einsammeln.
+    group_messages = private_dm_messages.setdefault(notification_type, {})
+    for recipient_messages in group_messages.values():
+        messages.extend(recipient_messages)
 
-def bunker_user_is_in_bunker(guild):
-    channel = get_bunker_channel(guild)
-    if channel is None:
-        return False
-    return any(member.id == BUNKER_USER_ID for member in channel.members)
+    # Die komplette Gruppe zurücksetzen.
+    private_dm_messages[notification_type] = {}
 
+    # Bei BWI zusätzlich alle User->DM-Zuordnungen aller Spiess-Accounts entfernen.
+    if notification_type == "bwi":
+        messages.extend(bwi_user_dm_messages.values())
+        bwi_user_dm_messages.clear()
 
-def bunker_dm_is_running():
-    return bunker_dm_task is not None and not bunker_dm_task.done()
-
-
-def cancel_bunker_dm_task():
-    global bunker_dm_task
-    task = bunker_dm_task
-    bunker_dm_task = None
-
-    # Nicht den gerade laufenden Task gegen sich selbst canceln.
-    if task is not None and not task.done() and task is not asyncio.current_task():
-        task.cancel()
-
-
-async def delete_bunker_dm_messages():
-    global bunker_dm_messages
-
-    messages = list(bunker_dm_messages)
-    bunker_dm_messages.clear()
-
+    # Doppelte Message-Objekte vermeiden und alle DMs löschen.
+    seen = set()
     for message in messages:
+        if message is None or message.id in seen:
+            continue
+        seen.add(message.id)
         try:
             await message.delete()
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
 
-async def send_bunker_dm():
-    user = bot.get_user(BUNKER_USER_ID)
-
-    if user is None:
-        try:
-            user = await bot.fetch_user(BUNKER_USER_ID)
-        except (discord.NotFound, discord.HTTPException):
-            print("❌ BUNKER_USER_ID konnte nicht gefunden werden.")
-            return False
-
-    try:
-        message = await user.send(
-            BUNKER_MESSAGE,
-            view=BunkerDMView()
-        )
-        bunker_dm_messages.append(message)
-        return True
-
-    except discord.Forbidden:
-        print("❌ Bunker-DM konnte nicht gesendet werden (DMs möglicherweise deaktiviert).")
-        return False
-
-    except discord.HTTPException as e:
-        print(f"❌ Fehler beim Senden der Bunker-DM: {e}")
-        return False
-
-
-async def repeat_bunker_dm(guild):
-    global bunker_dm_task
-
-    try:
-        while True:
-            # Sicherheitsprüfung vor jeder neuen Nachricht.
-            if not bunker_has_spiess(guild) or bunker_user_is_in_bunker(guild):
-                return
-
-            sent = await send_bunker_dm()
-            if not sent:
-                return
-
-            await asyncio.sleep(BUNKER_DM_INTERVAL)
-
-    except asyncio.CancelledError:
-        return
-
-    finally:
-        if bunker_dm_task is asyncio.current_task():
-            bunker_dm_task = None
-
-
-def start_bunker_dm_task(guild):
-    global bunker_dm_task
-
-    # Egal wie viele Spieße joinen: maximal EIN Task.
-    if bunker_dm_is_running():
-        return
-
-    # Falls der Bunker-User schon drin ist, gibt es nichts zu melden.
-    if bunker_user_is_in_bunker(guild):
-        return
-
-    bunker_dm_task = asyncio.create_task(
-        repeat_bunker_dm(guild)
-    )
-
-
-async def disconnect_all_spiess_from_bunker(guild):
-    channel = get_bunker_channel(guild)
-    if channel is None:
-        return
-
-    spiess_members = [
-        member
-        for member in list(channel.members)
-        if not member.bot and member_is_spiess(member)
-    ]
-
-    for member in spiess_members:
-        try:
-            await member.move_to(
-                None,
-                reason="Bunkerzeit: Nicht jetzt"
-            )
-        except discord.Forbidden:
-            print(f"❌ {member} konnte nicht aus dem Führerbunker getrennt werden.")
-        except discord.HTTPException as e:
-            print(f"❌ Fehler beim Trennen von {member}: {e}")
-
-
-class BunkerNotNowButton(discord.ui.Button):
-    def __init__(self):
+class PrivateNotNowButton(discord.ui.Button):
+    def __init__(self, notification_type):
+        label = "Nicht jetzt" if notification_type == "bwi" else "Jetzt nicht"
         super().__init__(
-            label="Nicht jetzt",
+            label=label,
             style=discord.ButtonStyle.secondary,
-            custom_id="bunker_dm:not_now"
+            custom_id=f"private_voice_dm:not_now:{notification_type}"
         )
+        self.notification_type = notification_type
 
     async def callback(self, interaction: discord.Interaction):
-        # Nur der konfigurierte Bunker-User darf die Aktion auslösen.
-        if interaction.user.id != BUNKER_USER_ID:
-            await interaction.response.send_message(
-                "❌ Dieser Button ist nicht für dich.",
-                ephemeral=True
-            )
-            return
-
-        # Bei DMs ist interaction.guild None, deshalb den Server über die feste ID holen.
-        guild = bot.get_guild(GUILD_ID)
-        if guild is None:
-            await interaction.response.send_message(
-                "❌ Der Server konnte nicht gefunden werden.",
-                ephemeral=True
-            )
-            return
-
         await interaction.response.defer()
-
-        # Zuerst stoppen, damit während des Aufräumens keine neue DM entsteht.
-        cancel_bunker_dm_task()
-
-        # Danach alle Spieße aus dem Führerbunker trennen.
-        await disconnect_all_spiess_from_bunker(guild)
-
-        # Zum Schluss alle von dieser Funktion gespeicherten Bunkerzeit-DMs löschen.
-        await delete_bunker_dm_messages()
+        # Global für alle Spiess-Accounts:
+        # Nur die jeweilige Gruppe löschen; keine User aus Voice-Channels werfen
+        # und zukünftige Benachrichtigungen nicht deaktivieren.
+        await delete_private_dm_group(self.notification_type)
 
 
-class BunkerDMView(discord.ui.View):
-    def __init__(self):
+class PrivateVoiceDMView(discord.ui.View):
+    def __init__(self, notification_type, channel_id):
         super().__init__(timeout=None)
 
-        # Link-Button: öffnet direkt den Führerbunker in Discord.
+        if notification_type == "bunker":
+            label = "Zum Bunker"
+        else:
+            label = "Let's Jerk"
+
         self.add_item(
             discord.ui.Button(
-                label="Zum Bunker",
+                label=label,
                 style=discord.ButtonStyle.link,
-                url=(
-                    f"https://discord.com/channels/"
-                    f"{GUILD_ID}/{BUNKER_VOICE_CHANNEL_ID}"
-                )
+                url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
             )
         )
+        self.add_item(PrivateNotNowButton(notification_type))
 
-        self.add_item(BunkerNotNowButton())
-# ==================================================================
+
+class BWIPrivateDMView(discord.ui.View):
+    def __init__(self, channel_name, channel_id):
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Button(
+                label="Zum Channel",
+                style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
+            )
+        )
+        self.add_item(PrivateNotNowButton("bwi"))
+
+
+async def send_private_channel_dm_to_spiess(guild, notification_type, channel_id, message_text):
+    """Bunker/Jerking: DM an jeden Spiess-Account."""
+    for recipient in await get_spiess_members(guild):
+        # Wer selbst gerade im Zielchannel sitzt, braucht keine Join-DM.
+        if recipient.voice and recipient.voice.channel and recipient.voice.channel.id == channel_id:
+            continue
+
+        try:
+            message = await recipient.send(
+                message_text,
+                view=PrivateVoiceDMView(notification_type, channel_id)
+            )
+            private_dm_messages.setdefault(notification_type, {}).setdefault(recipient.id, []).append(message)
+        except discord.Forbidden:
+            print(f"❌ Private {notification_type}-DM an {recipient} nicht möglich.")
+        except discord.HTTPException as e:
+            print(f"❌ Fehler bei privater {notification_type}-DM an {recipient}: {e}")
+
+
+async def send_or_update_bwi_dm(guild, watched_member, voice_channel):
+    """
+    Pro Spiess-Empfänger + beobachtetem User existiert maximal eine aktive BWI-DM.
+    Bei Wechsel innerhalb BWI wird genau diese Nachricht editiert.
+    """
+    channel_name = BWI_VOICE_CHANNEL_IDS.get(voice_channel.id, voice_channel.name)
+    content = (
+        f"{watched_member.mention} ist dem BWI Bereich beigetreten\n"
+        f"und ist im Channel **{channel_name}**"
+    )
+
+    for recipient in await get_spiess_members(guild):
+        if recipient.id == watched_member.id:
+            continue
+
+        key = (recipient.id, watched_member.id)
+        old_message = bwi_user_dm_messages.get(key)
+        view = BWIPrivateDMView(channel_name, voice_channel.id)
+
+        if old_message is not None:
+            try:
+                await old_message.edit(content=content, view=view)
+                continue
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                bwi_user_dm_messages.pop(key, None)
+
+        try:
+            message = await recipient.send(content, view=view)
+            bwi_user_dm_messages[key] = message
+            private_dm_messages.setdefault("bwi", {}).setdefault(recipient.id, []).append(message)
+        except discord.Forbidden:
+            print(f"❌ Private BWI-DM an {recipient} nicht möglich.")
+        except discord.HTTPException as e:
+            print(f"❌ Fehler bei privater BWI-DM an {recipient}: {e}")
+
+
+async def clear_bwi_user_tracking(watched_member_id):
+    # Wenn der User den BWI-Bereich komplett verlässt, wird nur das Update-Tracking
+    # aufgehoben. Die alte DM bleibt stehen, bis der Spiess 'Nicht jetzt' drückt.
+    for key in list(bwi_user_dm_messages):
+        if key[1] == watched_member_id:
+            bwi_user_dm_messages.pop(key, None)
 
 
 # ================== VOICE STATE ==================
@@ -1074,18 +1056,6 @@ async def on_voice_state_update(
         is_spiess = member_is_spiess(member)
 
         # --------------------------------------------------
-        # PRIVATE BUNKER-DM
-        # --------------------------------------------------
-        # Bunker-User betritt selbst den Führerbunker:
-        # private 30-Sekunden-Schleife stoppen + bisherige DMs löschen.
-        if (
-            member.id == BUNKER_USER_ID
-            and after.channel.id == BUNKER_VOICE_CHANNEL_ID
-        ):
-            cancel_bunker_dm_task()
-            await delete_bunker_dm_messages()
-
-        # --------------------------------------------------
         # BUNKER
         # --------------------------------------------------
         if (
@@ -1104,6 +1074,9 @@ async def on_voice_state_update(
                     BUNKER_MESSAGE,
                     "bunker"
                 )
+            await send_private_channel_dm_to_spiess(
+                member.guild, "bunker", BUNKER_VOICE_CHANNEL_ID, BUNKER_MESSAGE
+            )
 
         # --------------------------------------------------
         # JERKING
@@ -1124,6 +1097,9 @@ async def on_voice_state_update(
                     JERKING_MESSAGE,
                     "jerking"
                 )
+            await send_private_channel_dm_to_spiess(
+                member.guild, "jerking", JERKING_VOICE_CHANNEL_ID, JERKING_MESSAGE
+            )
 
         # Spiess betritt Bunker/Jerking:
         # Timer stoppen und nur die zugehörigen Meldungen löschen.
@@ -1138,9 +1114,8 @@ async def on_voice_state_update(
                     "bunker"
                 )
 
-                # Unabhängig davon private Bunker-DM starten.
-                # start_bunker_dm_task verhindert doppelte Schleifen automatisch.
-                start_bunker_dm_task(member.guild)
+                # Admin-Channel-Logik bleibt unverändert.
+                pass
 
             elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
                 cancel_voice_notification_timers(
@@ -1153,55 +1128,40 @@ async def on_voice_state_update(
 
         # --------------------------------------------------
         # BWI-BEREICH
-        # Nur beim Eintritt von außerhalb in die BWI-Kategorie.
-        # Wechsel zwischen zwei Voice-Channels derselben Kategorie
-        # erzeugt keine zusätzliche Meldung.
         # --------------------------------------------------
-        entered_bwi_area = (
+        in_bwi_now = (
             is_bwi_voice_channel(after.channel)
-            and not is_bwi_voice_channel(before.channel)
+            and after.channel.id in BWI_VOICE_CHANNEL_IDS
+        )
+        was_in_bwi = (
+            is_bwi_voice_channel(before.channel)
+            and before.channel.id in BWI_VOICE_CHANNEL_IDS
         )
 
-        if entered_bwi_area:
-
+        if in_bwi_now:
             if is_spiess:
-                # Ein Spiess betritt den BWI-Bereich:
-                # alle offenen BWI-Meldungen auf einmal löschen.
-                await delete_voice_notifications(
-                    member.guild,
-                    "bwi"
-                )
-
+                # Bestehende Admin-Channel-BWI-Meldungen aufräumen.
+                await delete_voice_notifications(member.guild, "bwi")
             else:
-                # Keine Wiederholung / kein Minuten-Timer für BWI.
-                await send_voice_notification(
-                    member.guild,
-                    f"{member.mention} ist dem BWI-Bereich beigetreten",
-                    "bwi"
-                )
+                # Admin-Channel nur beim Eintritt von außerhalb.
+                if not was_in_bwi:
+                    await send_voice_notification(
+                        member.guild,
+                        f"{member.mention} ist dem BWI-Bereich beigetreten",
+                        "bwi"
+                    )
 
-    # --------------------------------------------------
-    # LETZTER SPIESS VERLÄSST DEN FÜHRERBUNKER
-    # --------------------------------------------------
-    # Dann nur die private 30-Sekunden-Schleife stoppen.
-    # Bereits gesendete DMs bleiben absichtlich bestehen.
-    left_bunker = (
+                # Privat: Eintritt = neue DM; interner Channelwechsel = vorhandene DM editieren.
+                await send_or_update_bwi_dm(member.guild, member, after.channel)
+
+    # BWI-User verlässt den überwachten Bereich vollständig:
+    if (
         before.channel is not None
-        and before.channel.id == BUNKER_VOICE_CHANNEL_ID
-        and (
-            after.channel is None
-            or after.channel.id != BUNKER_VOICE_CHANNEL_ID
-        )
-    )
-
-    if left_bunker and member_is_spiess(member):
-        bunker_channel = member.guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
-
-        if (
-            bunker_channel is not None
-            and not channel_has_spiess(bunker_channel)
-        ):
-            cancel_bunker_dm_task()
+        and before.channel.id in BWI_VOICE_CHANNEL_IDS
+        and (after.channel is None or after.channel.id not in BWI_VOICE_CHANNEL_IDS)
+        and not member_is_spiess(member)
+    ):
+        await clear_bwi_user_tracking(member.id)
 
     now = datetime.datetime.now(
         datetime.UTC
