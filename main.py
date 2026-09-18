@@ -61,8 +61,6 @@ BWI_ROLE_ID = 1486613262953877645
 ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 
 
-# Voice-Benachrichtigungen
-VOICE_NOTIFICATION_CHANNEL_ID = 1506982204700360767
 SPIESS_ROLE_ID = 1486560941368803389
 
 BUNKER_VOICE_CHANNEL_ID = 1486574554900987986
@@ -79,9 +77,19 @@ GUILD_ID = 1486542167601184788
 
 BUNKER_DM_INTERVAL = 30
 
-# Private Erinnerung an JERKING_USER_ID, wenn ein Spiess im Führerbunker wartet.
-JERKING_TARGET_CHANNEL_ID = BUNKER_VOICE_CHANNEL_ID
-JERKING_REMINDER_INTERVAL = 5 * 60
+# Private Erinnerung an JERKING_USER_ID, wenn ein Spiess in der Alten Mühle wartet.
+JERKING_TARGET_CHANNEL_ID = JERKING_VOICE_CHANNEL_ID
+
+# Jede Wiederholung bekommt einen neuen zufälligen Abstand:
+# mindestens 3:47 Minuten, höchstens 5:00 Minuten.
+JERKING_REMINDER_MIN_INTERVAL = 3 * 60 + 47
+JERKING_REMINDER_MAX_INTERVAL = 5 * 60
+
+def get_random_jerking_reminder_interval():
+    return random.randint(
+        JERKING_REMINDER_MIN_INTERVAL,
+        JERKING_REMINDER_MAX_INTERVAL
+    )
 
 ADJEKTIVE = [
     "arschiger", "idiotischer", "stinkender", "vergammelter", "verfaulter",
@@ -170,20 +178,23 @@ invite_cache = {}
 # ==================================================
 
 
-# ================== VOICE-BENACHRICHTIGUNGS-TIMER ==================
-# Pro Benachrichtigung kann ein eigener 3-Minuten-Timer laufen.
-voice_notification_timers = {
-    BUNKER_VOICE_CHANNEL_ID: set(),
-    JERKING_VOICE_CHANNEL_ID: set(),
+
+
+# ================== PRIVATE BUNKER/JERKING-DM LOOPS ==================
+# BUNKER_USER_ID / JERKING_USER_ID joint den jeweiligen Voice-Channel:
+# sofortige DM an alle Spiess-Accounts und danach jede Minute erneut,
+# bis ein Spiess joint oder "Jetzt nicht" gedrückt wird.
+PRIVATE_VOICE_DM_INTERVAL = 60
+
+private_voice_dm_tasks = {
+    "bunker": None,
+    "jerking": None,
 }
-# ===================================================================
 
-
-# ================== PRIVATE BUNKER-DM ==================
-# Eigener Task: unabhängig vom 60-Sekunden-Admin-Timer.
+# Altbestand für die allgemeine DM-Löschlogik.
 bunker_dm_task = None
 bunker_dm_messages = []
-# =======================================================
+# =====================================================================
 
 
 # ============================================================
@@ -397,14 +408,12 @@ async def on_ready():
     # Persistente Bestätigen-Buttons registrieren.
     # Dadurch funktionieren bereits gesendete Buttons auch nach einem Bot-Neustart.
     if not getattr(bot, "_notification_views_registered", False):
-        bot.add_view(ClearNotificationView("bunker"))
-        bot.add_view(ClearNotificationView("jerking"))
-        bot.add_view(ClearNotificationView("bwi"))
         bot.add_view(PrivateVoiceDMView("bunker", BUNKER_VOICE_CHANNEL_ID))
         bot.add_view(PrivateVoiceDMView("jerking", JERKING_VOICE_CHANNEL_ID))
         bot.add_view(BWIPrivateDMView(BWI_VOICE_CHANNEL_IDS[1486613172126355546], 1486613172126355546))
         bot.add_view(JerkingTargetDMView("first"))
         bot.add_view(JerkingTargetDMView("reminder"))
+        bot.add_view(DeleteAllDMView())
         bot._notification_views_registered = True
 
     # Aktuelle Invite-Zähler aller Server laden
@@ -691,7 +700,7 @@ async def on_member_join(member):
 # ==================================================
 
 
-# ================== VOICE-BENACHRICHTIGUNGEN ==================
+# ================== VOICE-HILFSFUNKTIONEN ==================
 def channel_has_spiess(voice_channel):
     return any(
         any(role.id == SPIESS_ROLE_ID for role in channel_member.roles)
@@ -712,203 +721,7 @@ def is_bwi_voice_channel(channel):
         channel is not None
         and channel.category_id == BWI_VOICE_CATEGORY_ID
     )
-
-
-async def delete_voice_notifications(guild, notification_type):
-    notification_channel = guild.get_channel(
-        VOICE_NOTIFICATION_CHANNEL_ID
-    )
-
-    if notification_channel is None:
-        print(
-            f"❌ Benachrichtigungs-Channel mit ID "
-            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
-        )
-        return
-
-    try:
-        async for message in notification_channel.history(limit=None):
-            if message.author.id != bot.user.id:
-                continue
-
-            should_delete = False
-
-            if notification_type == "bunker":
-                should_delete = message.content == BUNKER_MESSAGE
-
-            elif notification_type == "jerking":
-                should_delete = message.content == JERKING_MESSAGE
-
-            elif notification_type == "bwi":
-                should_delete = (
-                    message.content.startswith("<@")
-                    and message.content.endswith(
-                        f" ist dem {BWI_NOTIFICATION_PREFIX}"
-                    )
-                )
-
-            if should_delete:
-                try:
-                    await message.delete()
-                except discord.NotFound:
-                    pass
-
-    except discord.Forbidden:
-        print(
-            "❌ Bot kann die Voice-Benachrichtigungen "
-            "nicht lesen oder löschen."
-        )
-
-    except discord.HTTPException as e:
-        print(
-            f"❌ Fehler beim Löschen der Voice-Benachrichtigungen: {e}"
-        )
-
-
-class ClearNotificationButton(discord.ui.Button):
-    def __init__(self, notification_type):
-        labels = {
-            "bunker": "✓ Gesehen",
-            "jerking": "✓ Gesehen",
-            "bwi": "✓ Gesehen",
-        }
-
-        super().__init__(
-            label=labels[notification_type],
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"clear_voice_notifications:{notification_type}"
-        )
-
-        self.notification_type = notification_type
-
-    async def callback(self, interaction: discord.Interaction):
-        # Die beiden Minuten-Timer müssen beim manuellen Bestätigen
-        # ebenfalls beendet werden, sonst käme die Meldung erneut.
-        if self.notification_type == "bunker":
-            cancel_voice_notification_timers(
-                BUNKER_VOICE_CHANNEL_ID
-            )
-
-        elif self.notification_type == "jerking":
-            cancel_voice_notification_timers(
-                JERKING_VOICE_CHANNEL_ID
-            )
-
-        await interaction.response.defer()
-
-        await delete_voice_notifications(
-            interaction.guild,
-            self.notification_type
-        )
-
-
-class ClearNotificationView(discord.ui.View):
-    def __init__(self, notification_type):
-        # timeout=None + feste custom_id = persistenter Button
-        super().__init__(timeout=None)
-        self.add_item(
-            ClearNotificationButton(notification_type)
-        )
-
-
-async def send_voice_notification(
-    guild,
-    message_text,
-    notification_type
-):
-    notification_channel = guild.get_channel(
-        VOICE_NOTIFICATION_CHANNEL_ID
-    )
-
-    if notification_channel is None:
-        print(
-            f"❌ Benachrichtigungs-Channel mit ID "
-            f"{VOICE_NOTIFICATION_CHANNEL_ID} wurde nicht gefunden."
-        )
-        return
-
-    try:
-        await notification_channel.send(
-            message_text,
-            view=ClearNotificationView(notification_type)
-        )
-
-    except discord.Forbidden:
-        print(
-            "❌ Bot kann keine Voice-Benachrichtigung senden."
-        )
-
-    except discord.HTTPException as e:
-        print(
-            f"❌ Fehler beim Senden der Voice-Benachrichtigung: {e}"
-        )
-
-
-async def repeat_voice_notification_after_delay(
-    guild,
-    voice_channel_id,
-    message_text,
-    notification_type
-):
-    try:
-        while True:
-            # Nach jeder Meldung 1 Minute warten.
-            await asyncio.sleep(60)
-
-            # Solange kein Spiess den zugehörigen Voice-Channel
-            # betritt und den Task abbricht, erneut benachrichtigen.
-            await send_voice_notification(
-                guild,
-                message_text,
-                notification_type
-            )
-
-    except asyncio.CancelledError:
-        return
-
-
-def start_voice_notification_timer(
-    guild,
-    voice_channel_id,
-    message_text,
-    notification_type
-):
-    task = asyncio.create_task(
-        repeat_voice_notification_after_delay(
-            guild,
-            voice_channel_id,
-            message_text,
-            notification_type
-        )
-    )
-
-    voice_notification_timers.setdefault(
-        voice_channel_id,
-        set()
-    ).add(task)
-
-    task.add_done_callback(
-        lambda finished_task: voice_notification_timers
-        .get(voice_channel_id, set())
-        .discard(finished_task)
-    )
-
-
-def cancel_voice_notification_timers(voice_channel_id):
-    for task in list(
-        voice_notification_timers.get(
-            voice_channel_id,
-            set()
-        )
-    ):
-        task.cancel()
-
-    voice_notification_timers.get(
-        voice_channel_id,
-        set()
-    ).clear()
-# ===============================================================
-
+# ============================================================
 
 # ================== PRIVATE VOICE-DM FUNKTIONEN ==================
 async def get_spiess_members(guild):
@@ -952,6 +765,85 @@ async def delete_private_dm_group(notification_type):
             pass
 
 
+def private_voice_dm_loop_is_running(notification_type):
+    task = private_voice_dm_tasks.get(notification_type)
+    return task is not None and not task.done()
+
+
+def cancel_private_voice_dm_loop(notification_type):
+    task = private_voice_dm_tasks.get(notification_type)
+    private_voice_dm_tasks[notification_type] = None
+
+    if (
+        task is not None
+        and not task.done()
+        and task is not asyncio.current_task()
+    ):
+        task.cancel()
+
+
+async def repeat_private_voice_dm_loop(
+    guild,
+    notification_type,
+    channel_id,
+    message_text
+):
+    try:
+        while True:
+            await asyncio.sleep(PRIVATE_VOICE_DM_INTERVAL)
+
+            channel = guild.get_channel(channel_id)
+            if channel is None or channel_has_spiess(channel):
+                return
+
+            await send_private_channel_dm_to_spiess(
+                guild,
+                notification_type,
+                channel_id,
+                message_text
+            )
+
+    except asyncio.CancelledError:
+        return
+
+    finally:
+        if private_voice_dm_tasks.get(notification_type) is asyncio.current_task():
+            private_voice_dm_tasks[notification_type] = None
+
+
+async def start_private_voice_dm_loop(
+    guild,
+    notification_type,
+    channel_id,
+    message_text
+):
+    # Pro Gruppe darf nur genau ein Wiederholungs-Loop laufen.
+    if private_voice_dm_loop_is_running(notification_type):
+        return
+
+    channel = guild.get_channel(channel_id)
+    if channel is None or channel_has_spiess(channel):
+        return
+
+    # Erste Nachricht sofort.
+    await send_private_channel_dm_to_spiess(
+        guild,
+        notification_type,
+        channel_id,
+        message_text
+    )
+
+    # Danach jede Minute erneut, bis ein Spiess joint oder "Jetzt nicht" gedrückt wird.
+    private_voice_dm_tasks[notification_type] = asyncio.create_task(
+        repeat_private_voice_dm_loop(
+            guild,
+            notification_type,
+            channel_id,
+            message_text
+        )
+    )
+
+
 class PrivateNotNowButton(discord.ui.Button):
     def __init__(self, notification_type):
         label = "Nicht jetzt" if notification_type == "bwi" else "Jetzt nicht"
@@ -964,9 +856,13 @@ class PrivateNotNowButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        # Global für alle Spiess-Accounts:
-        # Nur die jeweilige Gruppe löschen; keine User aus Voice-Channels werfen
-        # und zukünftige Benachrichtigungen nicht deaktivieren.
+
+        # Bei Bunker/Jerking beendet "Jetzt nicht" zusätzlich den kompletten
+        # Wiederholungs-Loop. BWI besitzt keinen solchen Loop.
+        if self.notification_type in ("bunker", "jerking"):
+            cancel_private_voice_dm_loop(self.notification_type)
+
+        # Global für alle Spiess-Accounts die zugehörigen DMs löschen.
         await delete_private_dm_group(self.notification_type)
 
 
@@ -987,6 +883,7 @@ class PrivateVoiceDMView(discord.ui.View):
             )
         )
         self.add_item(PrivateNotNowButton(notification_type))
+        self.add_item(DeleteAllDMButton())
 
 
 class BWIPrivateDMView(discord.ui.View):
@@ -1000,6 +897,7 @@ class BWIPrivateDMView(discord.ui.View):
             )
         )
         self.add_item(PrivateNotNowButton("bwi"))
+        self.add_item(DeleteAllDMButton())
 
 
 async def send_private_channel_dm_to_spiess(guild, notification_type, channel_id, message_text):
@@ -1176,6 +1074,7 @@ class JerkingTargetDMView(discord.ui.View):
             )
         )
         self.add_item(JerkingTargetNotNowButton(message_type))
+        self.add_item(DeleteAllDMButton())
 
 
 async def get_jerking_target_user():
@@ -1222,10 +1121,17 @@ async def jerking_target_reminder_loop(guild):
 
     try:
         # Die erste Nachricht wurde bereits beim Join des Spiess gesendet.
-        # Exakt fünf Minuten bis zur ersten randomisierten Erinnerung warten.
-        await asyncio.sleep(JERKING_REMINDER_INTERVAL)
-
+        # Vor JEDER Erinnerung einen neuen zufälligen Abstand zwischen
+        # 3:47 Minuten und 5:00 Minuten wählen.
         while True:
+            delay = get_random_jerking_reminder_interval()
+            print(
+                f"⏳ Nächste Jerking-Erinnerung in "
+                f"{delay // 60}:{delay % 60:02d} Minuten.",
+                flush=True
+            )
+            await asyncio.sleep(delay)
+
             # Sobald niemand mit Spiess mehr wartet oder der Zieluser da ist: Ende.
             if (
                 not spiess_is_waiting_in_jerking_target(guild)
@@ -1239,8 +1145,6 @@ async def jerking_target_reminder_loop(guild):
             )
             if not sent:
                 return
-
-            await asyncio.sleep(JERKING_REMINDER_INTERVAL)
 
     except asyncio.CancelledError:
         return
@@ -1286,7 +1190,7 @@ async def on_voice_state_update(
         return
 
     # ==================================================
-    # VOICE-BENACHRICHTIGUNGEN
+    # VOICE-EVENTS
     # ==================================================
     joined_channel = (
         after.channel is not None
@@ -1302,7 +1206,7 @@ async def on_voice_state_update(
 
         # --------------------------------------------------
         # PRIVATE ERINNERUNG AN JERKING_USER_ID
-        # Ziel ist bewusst der Führerbunker/BUNKER_VOICE_CHANNEL_ID.
+        # Ziel ist bewusst die Alte Mühle/JERKING_VOICE_CHANNEL_ID.
         # --------------------------------------------------
         if (
             is_spiess
@@ -1328,19 +1232,11 @@ async def on_voice_state_update(
             and after.channel.id == BUNKER_VOICE_CHANNEL_ID
         ):
             if not channel_has_spiess(after.channel):
-                await send_voice_notification(
+                await start_private_voice_dm_loop(
                     member.guild,
-                    BUNKER_MESSAGE,
-                    "bunker"
-                )
-                start_voice_notification_timer(
-                    member.guild,
+                    "bunker",
                     BUNKER_VOICE_CHANNEL_ID,
-                    BUNKER_MESSAGE,
-                    "bunker"
-                )
-                await send_private_channel_dm_to_spiess(
-                    member.guild, "bunker", BUNKER_VOICE_CHANNEL_ID, BUNKER_MESSAGE
+                    BUNKER_MESSAGE
                 )
 
         # --------------------------------------------------
@@ -1351,49 +1247,29 @@ async def on_voice_state_update(
             and after.channel.id == JERKING_VOICE_CHANNEL_ID
         ):
             if not channel_has_spiess(after.channel):
-                await send_voice_notification(
+                await start_private_voice_dm_loop(
                     member.guild,
-                    JERKING_MESSAGE,
-                    "jerking"
-                )
-                start_voice_notification_timer(
-                    member.guild,
+                    "jerking",
                     JERKING_VOICE_CHANNEL_ID,
-                    JERKING_MESSAGE,
-                    "jerking"
-                )
-                await send_private_channel_dm_to_spiess(
-                    member.guild, "jerking", JERKING_VOICE_CHANNEL_ID, JERKING_MESSAGE
+                    JERKING_MESSAGE
                 )
 
         # Spiess betritt Bunker/Jerking:
-        # Timer stoppen und nur die zugehörigen Meldungen löschen.
+        # Nur die zugehörigen privaten DMs aufräumen.
         if is_spiess:
 
             if after.channel.id == BUNKER_VOICE_CHANNEL_ID:
-                cancel_voice_notification_timers(
-                    BUNKER_VOICE_CHANNEL_ID
-                )
-                await delete_voice_notifications(
-                    member.guild,
-                    "bunker"
-                )
 
                 # Ein Spiess ist jetzt selbst im Bunker:
-                # private Bunker-DMs bei ALLEN Spiess-Accounts löschen.
+                # Loop beenden und private Bunker-DMs bei ALLEN Spiess-Accounts löschen.
+                cancel_private_voice_dm_loop("bunker")
                 await delete_private_dm_group("bunker")
 
             elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
-                cancel_voice_notification_timers(
-                    JERKING_VOICE_CHANNEL_ID
-                )
-                await delete_voice_notifications(
-                    member.guild,
-                    "jerking"
-                )
 
-                # Ein Spiess ist jetzt selbst im Jerking-Channel:
-                # private Jerking-DMs bei ALLEN Spiess-Accounts löschen.
+                # Ein Spiess ist jetzt selbst in der Alten Mühle:
+                # Loop beenden und private Jerking-DMs bei ALLEN Spiess-Accounts löschen.
+                cancel_private_voice_dm_loop("jerking")
                 await delete_private_dm_group("jerking")
 
         # --------------------------------------------------
@@ -1411,8 +1287,7 @@ async def on_voice_state_update(
         if in_bwi_now:
             if is_spiess:
                 # Ein Spiess befindet sich jetzt im BWI-Bereich:
-                # Admin-Meldungen UND private BWI-DMs bei allen Spiess-Accounts löschen.
-                await delete_voice_notifications(member.guild, "bwi")
+                # Private BWI-DMs bei allen Spiess-Accounts löschen.
                 await delete_private_dm_group("bwi")
             else:
                 # Nur melden, solange KEIN Spiess irgendwo im BWI-Bereich ist.
@@ -1426,14 +1301,6 @@ async def on_voice_state_update(
                 )
 
                 if not spiess_in_bwi:
-                    # Admin-Channel nur beim Eintritt von außerhalb.
-                    if not was_in_bwi:
-                        await send_voice_notification(
-                            member.guild,
-                            f"{member.mention} ist dem BWI-Bereich beigetreten",
-                            "bwi"
-                        )
-
                     # Privat: Eintritt = neue DM; interner Channelwechsel = vorhandene DM editieren.
                     await send_or_update_bwi_dm(member.guild, member, after.channel)
 
@@ -1835,43 +1702,33 @@ async def delete_bot_dm_messages_for_user(user):
     return total
 
 
-async def handle_delete_dm_command(message):
-    # Nur echte Privatnachrichten von Nutzern.
-    if message.guild is not None or message.author.bot:
-        return False
-
-    if message.content.strip().casefold() != "löschen":
-        return False
-
-    trigger_user = message.author
-
-    # Rollenstatus vor der Bereinigung bestimmen.
+async def delete_dm_for_trigger_user(trigger_user, source="löschen"):
+    """
+    Gemeinsame Löschlogik für Textkommando und 🗑️-Button.
+    Spiess -> alle Spiess-DMs, sonst nur der eigene DM.
+    """
     trigger_is_spiess = await user_is_spiess_by_id(trigger_user.id)
 
     if trigger_is_spiess:
         targets = await get_all_spiess_users()
 
-        # Auslöser garantiert mitnehmen.
         target_ids = {user.id for user in targets}
         if trigger_user.id not in target_ids:
             targets.append(trigger_user)
 
         print(
-            f"🧹 'löschen' von Spiess {trigger_user}: "
+            f"🧹 {source} von Spiess {trigger_user}: "
             f"{len(targets)} Spiess-Account(s) werden bereinigt.",
             flush=True
         )
-
     else:
         targets = [trigger_user]
-
         print(
-            f"🧹 'löschen' von {trigger_user}: nur dieser DM-Chat wird bereinigt.",
+            f"🧹 {source} von {trigger_user}: nur dieser DM-Chat wird bereinigt.",
             flush=True
         )
 
     total_deleted = 0
-
     for target in targets:
         total_deleted += await delete_bot_dm_messages_for_user(target)
 
@@ -1880,10 +1737,57 @@ async def handle_delete_dm_command(message):
         flush=True
     )
 
+    return total_deleted
+
+
+class DeleteAllDMButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            emoji="🗑️",
+            style=discord.ButtonStyle.danger,
+            custom_id="private_dm:delete_all_bot_messages"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # Nur in privaten Nachrichten verwenden.
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "❌ Dieser Button ist nur für private Nachrichten gedacht.",
+                ephemeral=True
+            )
+            return
+
+        # Sofort bestätigen, bevor die Nachricht mit diesem Button gelöscht wird.
+        await interaction.response.defer()
+
+        await delete_dm_for_trigger_user(
+            interaction.user,
+            source="🗑️"
+        )
+
+
+class DeleteAllDMView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(DeleteAllDMButton())
+
+
+async def handle_delete_dm_command(message):
+    # Nur echte Privatnachrichten von Nutzern.
+    if message.guild is not None or message.author.bot:
+        return False
+
+    if message.content.strip().casefold() != "löschen":
+        return False
+
+    await delete_dm_for_trigger_user(
+        message.author,
+        source="'löschen'"
+    )
+
     # Keine Bestätigungs-DM senden, sonst wäre der Chat direkt wieder nicht leer.
     # Die Nutzer-Nachricht "löschen" selbst kann der Bot nicht löschen.
     return True
-
 
 @bot.event
 async def on_message(message):
