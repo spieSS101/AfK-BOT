@@ -34,6 +34,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
 intents.invites = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 # =======================================================
@@ -1612,6 +1613,119 @@ async def check_inactivity():
                             f"von {member.name}: {e}"
                         )
 # ==================================================
+
+
+
+# ================== DM-BEFEHL: "löschen" ==================
+async def delete_bot_messages_in_dm(dm_channel):
+    """
+    Löscht ausschließlich Nachrichten des Bots im jeweiligen privaten DM-Chat.
+    Nachrichten des Users selbst bleiben unangetastet.
+    """
+    deleted_ids = set()
+
+    try:
+        async for dm_message in dm_channel.history(limit=None):
+            if bot.user is None or dm_message.author.id != bot.user.id:
+                continue
+
+            try:
+                deleted_ids.add(dm_message.id)
+                await dm_message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"❌ DM-Verlauf konnte nicht vollständig bereinigt werden: {e}")
+
+    # In-Memory-Referenzen auf bereits gelöschte Nachrichten ebenfalls aufräumen.
+    for notification_type, recipients in private_dm_messages.items():
+        for recipient_id in list(recipients):
+            recipients[recipient_id] = [
+                msg for msg in recipients[recipient_id]
+                if msg is not None and msg.id not in deleted_ids
+            ]
+            if not recipients[recipient_id]:
+                recipients.pop(recipient_id, None)
+
+    for key, msg in list(bwi_user_dm_messages.items()):
+        if msg is not None and msg.id in deleted_ids:
+            bwi_user_dm_messages.pop(key, None)
+
+    global bunker_dm_messages, jerking_target_dm_messages
+    bunker_dm_messages = [
+        msg for msg in bunker_dm_messages
+        if msg is not None and msg.id not in deleted_ids
+    ]
+    jerking_target_dm_messages = [
+        msg for msg in jerking_target_dm_messages
+        if msg is not None and msg.id not in deleted_ids
+    ]
+
+
+async def delete_all_bot_dms_to_spiess(guild):
+    """
+    Löscht ausschließlich Bot-Nachrichten aus den privaten Chats
+    ALLER Mitglieder mit der Spiess-Rolle.
+    """
+    for spiess_member in await get_spiess_members(guild):
+        try:
+            dm_channel = spiess_member.dm_channel
+            if dm_channel is None:
+                dm_channel = await spiess_member.create_dm()
+
+            await delete_bot_messages_in_dm(dm_channel)
+
+        except (discord.Forbidden, discord.HTTPException) as e:
+            print(f"❌ DMs bei Spiess {spiess_member} konnten nicht bereinigt werden: {e}")
+
+
+@bot.event
+async def on_message(message):
+    # Eigene Bot-Nachrichten niemals als Befehl behandeln.
+    if message.author.bot:
+        return
+
+    # Nur private Nachrichten auswerten.
+    if isinstance(message.channel, discord.DMChannel):
+        if message.content.strip().casefold() == "löschen":
+            guild = bot.get_guild(GUILD_ID)
+
+            # Prüfen, ob der Absender auf unserem Server die Spiess-Rolle besitzt.
+            sender_is_spiess = False
+            if guild is not None:
+                guild_member = guild.get_member(message.author.id)
+
+                if guild_member is None:
+                    try:
+                        guild_member = await guild.fetch_member(message.author.id)
+                    except (
+                        discord.NotFound,
+                        discord.Forbidden,
+                        discord.HTTPException
+                    ):
+                        guild_member = None
+
+                sender_is_spiess = (
+                    guild_member is not None
+                    and member_is_spiess(guild_member)
+                )
+
+            if sender_is_spiess and guild is not None:
+                # Spiess schreibt "löschen":
+                # alle Bot-DMs bei ALLEN Spiess-Accounts löschen.
+                await delete_all_bot_dms_to_spiess(guild)
+            else:
+                # Jeder andere User schreibt "löschen":
+                # nur alle Bot-Nachrichten in SEINEM eigenen DM-Chat löschen.
+                await delete_bot_messages_in_dm(message.channel)
+
+            # Die User-Nachricht "löschen" bleibt bestehen.
+            return
+
+    # Falls später normale Prefix-Commands hinzukommen, funktionieren sie weiterhin.
+    await bot.process_commands(message)
+# ============================================================
 
 
 # ================== BOT START ==================
