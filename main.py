@@ -1615,16 +1615,160 @@ async def check_inactivity():
 # ==================================================
 
 
-# ================== MESSAGE-EVENT TEST ==================
+# ================== DM-"LÖSCHEN" ==================
+# Verhalten:
+# - Schreibt ein Nutzer dem Bot privat exakt "löschen" (Groß-/Kleinschreibung egal),
+#   löscht der Bot alle EIGENEN Nachrichten aus diesem DM-Chat.
+# - Hat der auslösende Nutzer auf GUILD_ID die SPIESS_ROLE_ID,
+#   werden zusätzlich die Bot-Nachrichten in den DMs ALLER Spiess-Mitglieder gelöscht.
+# - Nachrichten der Nutzer kann und darf der Bot über die Bot-API nicht löschen.
+#
+# Wichtig: Discord bietet keinen Bulk-Delete-Endpunkt für DMs. Deshalb werden die
+# eigenen Bot-Nachrichten einzeln aus der DM-History gelöscht.
+
+async def user_is_spiess_by_id(user_id):
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return False
+
+    member = guild.get_member(user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return False
+
+    return member_is_spiess(member)
+
+
+async def delete_all_bot_messages_from_dm(user):
+    """Löscht aus dem DM mit `user` ausschließlich Nachrichten dieses Bots."""
+    try:
+        dm = user.dm_channel
+        if dm is None:
+            dm = await user.create_dm()
+
+        deleted = 0
+
+        async for message in dm.history(limit=None, oldest_first=False):
+            if bot.user is not None and message.author.id == bot.user.id:
+                try:
+                    await message.delete()
+                    deleted += 1
+                    # Etwas Luft für Discord-Ratelimits bei langen Verläufen.
+                    await asyncio.sleep(0.20)
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    print(f"❌ Eigene DM an {user} konnte nicht gelöscht werden.")
+                except discord.HTTPException as e:
+                    print(f"❌ Discord-Fehler beim Löschen einer DM an {user}: {e}")
+
+        return deleted
+
+    except discord.Forbidden:
+        print(f"❌ DM-Verlauf mit {user} ist für den Bot nicht zugänglich.")
+        return 0
+    except discord.HTTPException as e:
+        print(f"❌ DM-Verlauf mit {user} konnte nicht geladen werden: {e}")
+        return 0
+
+
+async def get_all_spiess_users():
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return []
+
+    # guild.members ist mit intents.members=True verfügbar.
+    # Zur Sicherheit wird die Liste über fetch_members vervollständigt, falls nötig.
+    members = list(guild.members)
+
+    try:
+        fetched = [member async for member in guild.fetch_members(limit=None)]
+        by_id = {member.id: member for member in members}
+        by_id.update({member.id: member for member in fetched})
+        members = list(by_id.values())
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    return [
+        member
+        for member in members
+        if not member.bot and member_is_spiess(member)
+    ]
+
+
+async def handle_delete_dm_command(message):
+    # Nur echte Privatnachrichten von Nutzern.
+    if message.guild is not None or message.author.bot:
+        return False
+
+    if message.content.strip().casefold() != "löschen":
+        return False
+
+    trigger_user = message.author
+
+    # Entscheiden, BEVOR irgendetwas gelöscht wird.
+    trigger_is_spiess = await user_is_spiess_by_id(trigger_user.id)
+
+    if trigger_is_spiess:
+        targets = await get_all_spiess_users()
+
+        # Der Auslöser soll garantiert enthalten sein, selbst falls Discord ihn
+        # aus irgendeinem Grund gerade nicht in der Member-Liste geliefert hat.
+        target_ids = {user.id for user in targets}
+        if trigger_user.id not in target_ids:
+            targets.append(trigger_user)
+
+        print(
+            f'🧹 DM-Löschung durch Spiess {trigger_user}: '
+            f'Bot-Nachrichten bei {len(targets)} Spiess-Account(s) werden gelöscht.'
+        )
+
+        total_deleted = 0
+        for target in targets:
+            total_deleted += await delete_all_bot_messages_from_dm(target)
+
+        # Alte In-Memory-Referenzen auf nun gelöschte Nachrichten leeren.
+        for notification_type in private_dm_messages:
+            private_dm_messages[notification_type] = {}
+        bwi_user_dm_messages.clear()
+        jerking_target_dm_messages.clear()
+        bunker_dm_messages.clear()
+
+        print(f"✅ Spiess-DM-Löschung fertig: {total_deleted} Bot-Nachricht(en) gelöscht.")
+
+    else:
+        deleted = await delete_all_bot_messages_from_dm(trigger_user)
+
+        # Referenzen dieses Empfängers aus den gespeicherten Gruppen entfernen.
+        for group in private_dm_messages.values():
+            group.pop(trigger_user.id, None)
+
+        for key in list(bwi_user_dm_messages):
+            if key[0] == trigger_user.id:
+                bwi_user_dm_messages.pop(key, None)
+
+        print(
+            f"✅ DM-Löschung für {trigger_user}: "
+            f"{deleted} Bot-Nachricht(en) gelöscht."
+        )
+
+    # Keine Bestätigungs-DM senden – sonst würde direkt wieder eine Bot-Nachricht
+    # im gerade geleerten Chat stehen. Die Nutzer-Nachricht "löschen" bleibt stehen.
+    return True
+
+
 @bot.event
 async def on_message(message):
-    print(
-        f"MESSAGE EVENT | "
-        f"Autor={message.author} | "
-        f"DM={message.guild is None} | "
-        f"Inhalt={message.content!r}"
-    )
-# ========================================================
+    handled = await handle_delete_dm_command(message)
+    if handled:
+        return
+
+    # Beibehalten, falls später !commands ergänzt werden.
+    await bot.process_commands(message)
+
+# ============================================================
 
 
 # ================== BOT START ==================
