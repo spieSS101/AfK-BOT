@@ -1615,21 +1615,16 @@ async def check_inactivity():
 # ==================================================
 
 
-# ================== DM-EMPFANG TEST ==================
+# ================== MESSAGE-EVENT TEST ==================
 @bot.event
 async def on_message(message):
-    # Eigene Bot-Nachrichten ignorieren.
-    if message.author.bot:
-        return
-
-    # Vorerst NUR testen, ob private Nachrichten beim Bot ankommen.
-    # Es wird noch nichts gelöscht und keine Voice-/BWI-Logik verändert.
-    if isinstance(message.channel, discord.DMChannel):
-        print(f"📩 DM bekommen von {message.author}: {message.content}")
-
-    # Normale Prefix-Commands weiterhin an discord.py weitergeben.
-    await bot.process_commands(message)
-# =====================================================
+    print(
+        f"MESSAGE EVENT | "
+        f"Autor={message.author} | "
+        f"DM={message.guild is None} | "
+        f"Inhalt={message.content!r}"
+    )
+# ========================================================
 
 
 # ================== BOT START ==================
