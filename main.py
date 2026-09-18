@@ -72,6 +72,10 @@ JERKING_USER_ID = int(os.getenv("JERKING_USER_ID", "0"))
 BUNKER_MESSAGE = "Bunkerzeit"
 JERKING_MESSAGE = "Jerking Hours"
 
+# Private Bunker-DM
+GUILD_ID = 1486542167601184788
+BUNKER_DM_INTERVAL = 30
+
 # BWI-Voice-Bereich (Discord-Kategorie)
 BWI_VOICE_CATEGORY_ID = 1486612928584093706
 BWI_NOTIFICATION_PREFIX = "BWI-Bereich beigetreten"
@@ -122,6 +126,13 @@ voice_notification_timers = {
     JERKING_VOICE_CHANNEL_ID: set(),
 }
 # ===================================================================
+
+
+# ================== PRIVATE BUNKER-DM ==================
+# Eigener Task: unabhängig vom 60-Sekunden-Admin-Timer.
+bunker_dm_task = None
+bunker_dm_messages = []
+# =======================================================
 
 
 # ============================================================
@@ -338,6 +349,7 @@ async def on_ready():
         bot.add_view(ClearNotificationView("bunker"))
         bot.add_view(ClearNotificationView("jerking"))
         bot.add_view(ClearNotificationView("bwi"))
+        bot.add_view(BunkerDMView())
         bot._notification_views_registered = True
 
     # Aktuelle Invite-Zähler aller Server laden
@@ -843,6 +855,198 @@ def cancel_voice_notification_timers(voice_channel_id):
 # ===============================================================
 
 
+# ================== PRIVATE BUNKER-DM FUNKTIONEN ==================
+def get_bunker_channel(guild):
+    channel = guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
+    return channel if isinstance(channel, discord.VoiceChannel) else None
+
+
+def bunker_has_spiess(guild):
+    channel = get_bunker_channel(guild)
+    return channel is not None and channel_has_spiess(channel)
+
+
+def bunker_user_is_in_bunker(guild):
+    channel = get_bunker_channel(guild)
+    if channel is None:
+        return False
+    return any(member.id == BUNKER_USER_ID for member in channel.members)
+
+
+def bunker_dm_is_running():
+    return bunker_dm_task is not None and not bunker_dm_task.done()
+
+
+def cancel_bunker_dm_task():
+    global bunker_dm_task
+    task = bunker_dm_task
+    bunker_dm_task = None
+
+    # Nicht den gerade laufenden Task gegen sich selbst canceln.
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def delete_bunker_dm_messages():
+    global bunker_dm_messages
+
+    messages = list(bunker_dm_messages)
+    bunker_dm_messages.clear()
+
+    for message in messages:
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def send_bunker_dm():
+    user = bot.get_user(BUNKER_USER_ID)
+
+    if user is None:
+        try:
+            user = await bot.fetch_user(BUNKER_USER_ID)
+        except (discord.NotFound, discord.HTTPException):
+            print("❌ BUNKER_USER_ID konnte nicht gefunden werden.")
+            return False
+
+    try:
+        message = await user.send(
+            BUNKER_MESSAGE,
+            view=BunkerDMView()
+        )
+        bunker_dm_messages.append(message)
+        return True
+
+    except discord.Forbidden:
+        print("❌ Bunker-DM konnte nicht gesendet werden (DMs möglicherweise deaktiviert).")
+        return False
+
+    except discord.HTTPException as e:
+        print(f"❌ Fehler beim Senden der Bunker-DM: {e}")
+        return False
+
+
+async def repeat_bunker_dm(guild):
+    global bunker_dm_task
+
+    try:
+        while True:
+            # Sicherheitsprüfung vor jeder neuen Nachricht.
+            if not bunker_has_spiess(guild) or bunker_user_is_in_bunker(guild):
+                return
+
+            sent = await send_bunker_dm()
+            if not sent:
+                return
+
+            await asyncio.sleep(BUNKER_DM_INTERVAL)
+
+    except asyncio.CancelledError:
+        return
+
+    finally:
+        if bunker_dm_task is asyncio.current_task():
+            bunker_dm_task = None
+
+
+def start_bunker_dm_task(guild):
+    global bunker_dm_task
+
+    # Egal wie viele Spieße joinen: maximal EIN Task.
+    if bunker_dm_is_running():
+        return
+
+    # Falls der Bunker-User schon drin ist, gibt es nichts zu melden.
+    if bunker_user_is_in_bunker(guild):
+        return
+
+    bunker_dm_task = asyncio.create_task(
+        repeat_bunker_dm(guild)
+    )
+
+
+async def disconnect_all_spiess_from_bunker(guild):
+    channel = get_bunker_channel(guild)
+    if channel is None:
+        return
+
+    spiess_members = [
+        member
+        for member in list(channel.members)
+        if not member.bot and member_is_spiess(member)
+    ]
+
+    for member in spiess_members:
+        try:
+            await member.move_to(
+                None,
+                reason="Bunkerzeit: Nicht jetzt"
+            )
+        except discord.Forbidden:
+            print(f"❌ {member} konnte nicht aus dem Führerbunker getrennt werden.")
+        except discord.HTTPException as e:
+            print(f"❌ Fehler beim Trennen von {member}: {e}")
+
+
+class BunkerNotNowButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Nicht jetzt",
+            style=discord.ButtonStyle.secondary,
+            custom_id="bunker_dm:not_now"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # Nur der konfigurierte Bunker-User darf die Aktion auslösen.
+        if interaction.user.id != BUNKER_USER_ID:
+            await interaction.response.send_message(
+                "❌ Dieser Button ist nicht für dich.",
+                ephemeral=True
+            )
+            return
+
+        # Bei DMs ist interaction.guild None, deshalb den Server über die feste ID holen.
+        guild = bot.get_guild(GUILD_ID)
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ Der Server konnte nicht gefunden werden.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        # Zuerst stoppen, damit während des Aufräumens keine neue DM entsteht.
+        cancel_bunker_dm_task()
+
+        # Danach alle Spieße aus dem Führerbunker trennen.
+        await disconnect_all_spiess_from_bunker(guild)
+
+        # Zum Schluss alle von dieser Funktion gespeicherten Bunkerzeit-DMs löschen.
+        await delete_bunker_dm_messages()
+
+
+class BunkerDMView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        # Link-Button: öffnet direkt den Führerbunker in Discord.
+        self.add_item(
+            discord.ui.Button(
+                label="Zum Bunker",
+                style=discord.ButtonStyle.link,
+                url=(
+                    f"https://discord.com/channels/"
+                    f"{GUILD_ID}/{BUNKER_VOICE_CHANNEL_ID}"
+                )
+            )
+        )
+
+        self.add_item(BunkerNotNowButton())
+# ==================================================================
+
+
 # ================== VOICE STATE ==================
 @bot.event
 async def on_voice_state_update(
@@ -868,6 +1072,18 @@ async def on_voice_state_update(
     if joined_channel:
 
         is_spiess = member_is_spiess(member)
+
+        # --------------------------------------------------
+        # PRIVATE BUNKER-DM
+        # --------------------------------------------------
+        # Bunker-User betritt selbst den Führerbunker:
+        # private 30-Sekunden-Schleife stoppen + bisherige DMs löschen.
+        if (
+            member.id == BUNKER_USER_ID
+            and after.channel.id == BUNKER_VOICE_CHANNEL_ID
+        ):
+            cancel_bunker_dm_task()
+            await delete_bunker_dm_messages()
 
         # --------------------------------------------------
         # BUNKER
@@ -922,6 +1138,10 @@ async def on_voice_state_update(
                     "bunker"
                 )
 
+                # Unabhängig davon private Bunker-DM starten.
+                # start_bunker_dm_task verhindert doppelte Schleifen automatisch.
+                start_bunker_dm_task(member.guild)
+
             elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
                 cancel_voice_notification_timers(
                     JERKING_VOICE_CHANNEL_ID
@@ -959,6 +1179,29 @@ async def on_voice_state_update(
                     f"{member.mention} ist dem BWI-Bereich beigetreten",
                     "bwi"
                 )
+
+    # --------------------------------------------------
+    # LETZTER SPIESS VERLÄSST DEN FÜHRERBUNKER
+    # --------------------------------------------------
+    # Dann nur die private 30-Sekunden-Schleife stoppen.
+    # Bereits gesendete DMs bleiben absichtlich bestehen.
+    left_bunker = (
+        before.channel is not None
+        and before.channel.id == BUNKER_VOICE_CHANNEL_ID
+        and (
+            after.channel is None
+            or after.channel.id != BUNKER_VOICE_CHANNEL_ID
+        )
+    )
+
+    if left_bunker and member_is_spiess(member):
+        bunker_channel = member.guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
+
+        if (
+            bunker_channel is not None
+            and not channel_has_spiess(bunker_channel)
+        ):
+            cancel_bunker_dm_task()
 
     now = datetime.datetime.now(
         datetime.UTC
