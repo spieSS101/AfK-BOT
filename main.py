@@ -1,4 +1,4 @@
-import discord
+
 from discord.ext import commands, tasks
 import datetime
 import os
@@ -875,6 +875,8 @@ class PrivateVoiceDMView(discord.ui.View):
         else:
             label = "Let's Jerk"
 
+        self.add_item(DeleteAllDMButton())
+        self.add_item(PrivateNotNowButton(notification_type))
         self.add_item(
             discord.ui.Button(
                 label=label,
@@ -882,13 +884,13 @@ class PrivateVoiceDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
             )
         )
-        self.add_item(PrivateNotNowButton(notification_type))
-        self.add_item(DeleteAllDMButton())
 
 
 class BWIPrivateDMView(discord.ui.View):
     def __init__(self, channel_name, channel_id):
         super().__init__(timeout=None)
+        self.add_item(DeleteAllDMButton())
+        self.add_item(PrivateNotNowButton("bwi"))
         self.add_item(
             discord.ui.Button(
                 label="Zum Channel",
@@ -896,8 +898,6 @@ class BWIPrivateDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
             )
         )
-        self.add_item(PrivateNotNowButton("bwi"))
-        self.add_item(DeleteAllDMButton())
 
 
 async def send_private_channel_dm_to_spiess(guild, notification_type, channel_id, message_text):
@@ -1066,6 +1066,8 @@ class JerkingTargetDMView(discord.ui.View):
 
         link_label = "let's go" if message_type == "first" else "tut mir leid 😓"
 
+        self.add_item(DeleteAllDMButton())
+        self.add_item(JerkingTargetNotNowButton(message_type))
         self.add_item(
             discord.ui.Button(
                 label=link_label,
@@ -1073,8 +1075,6 @@ class JerkingTargetDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{JERKING_TARGET_CHANNEL_ID}"
             )
         )
-        self.add_item(JerkingTargetNotNowButton(message_type))
-        self.add_item(DeleteAllDMButton())
 
 
 async def get_jerking_target_user():
