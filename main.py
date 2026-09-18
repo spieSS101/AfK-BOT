@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import datetime
 import os
 import asyncio
+import random
 import threading
 from flask import Flask
 from dotenv import load_dotenv
@@ -74,7 +75,39 @@ JERKING_MESSAGE = "Jerking Hours"
 
 # Private Bunker-DM
 GUILD_ID = 1486542167601184788
+
 BUNKER_DM_INTERVAL = 30
+
+# Private Erinnerung an JERKING_USER_ID, wenn ein Spiess im Führerbunker wartet.
+JERKING_TARGET_CHANNEL_ID = BUNKER_VOICE_CHANNEL_ID
+JERKING_REMINDER_INTERVAL = 5 * 60
+
+ADJEKTIVE = [
+    "arschiger", "idiotischer", "stinkender", "vergammelter", "verfaulter",
+    "hässlicher", "dreckiger", "ranziger", "räudiger", "ekelhafter",
+    "widerlicher", "bescheuerter", "bekloppter", "dämlicher", "hirnloser",
+    "geistloser", "zurückgebliebener", "nutzloser", "erbärmlicher",
+    "peinlicher", "lächerlicher", "armseliger", "verwirrter", "inkompetenter",
+    "missratener", "ungewaschener", "versiffter", "verschimmelter",
+    "verkrusteter", "aufgequollener", "fettiger", "schmieriger", "muffiger",
+    "gammeliger", "sabbernder", "furzender", "eierloser", "lappenartiger",
+    "hodenköpfiger",
+]
+
+NOMEN = [
+    "Affe", "Elefant", "Pinguin", "Fisch", "Schwanz", "Idiot", "Holzkopf",
+    "Lappen", "Vollpfosten", "Hohlkopf", "Trottel", "Clown", "Knecht",
+    "Lauch", "Esel", "Ochse", "Gorilla", "Pavian", "Orang-Utan", "Nacktmull",
+    "Waschbär", "Wombat", "Seegurke", "Kröte", "Karpfen", "Thunfisch",
+    "Gartenzwerg", "Mülleimer", "Klodeckel", "Toilettenbesen", "Abfluss",
+    "Türstopper", "Bierdeckel", "Kartoffelsack", "Müllsack", "Duschvorhang",
+    "Teppich", "Aschenbecher", "Klobürste", "Sockenhalter", "Hodenkobold",
+    "Arschgeige", "Furzkanone", "Kotzbrocken", "Rotzlöffel", "Hackfresse",
+    "Kackspaten", "Eierkopf", "Dödel", "Arschkopf",
+]
+
+jerking_target_dm_task = None
+jerking_target_dm_messages = []
 
 # BWI-Voice-Bereich (Discord-Kategorie)
 BWI_VOICE_CATEGORY_ID = 1486612928584093706
@@ -369,6 +402,8 @@ async def on_ready():
         bot.add_view(PrivateVoiceDMView("bunker", BUNKER_VOICE_CHANNEL_ID))
         bot.add_view(PrivateVoiceDMView("jerking", JERKING_VOICE_CHANNEL_ID))
         bot.add_view(BWIPrivateDMView(BWI_VOICE_CHANNEL_IDS[1486613172126355546], 1486613172126355546))
+        bot.add_view(JerkingTargetDMView("first"))
+        bot.add_view(JerkingTargetDMView("reminder"))
         bot._notification_views_registered = True
 
     # Aktuelle Invite-Zähler aller Server laden
@@ -1029,6 +1064,215 @@ async def clear_bwi_user_tracking(watched_member_id):
             bwi_user_dm_messages.pop(key, None)
 
 
+
+# ================== PRIVATE DM AN JERKING_USER_ID ==================
+def jerking_target_is_in_channel(guild):
+    channel = guild.get_channel(JERKING_TARGET_CHANNEL_ID)
+    return (
+        channel is not None
+        and any(m.id == JERKING_USER_ID for m in channel.members)
+    )
+
+
+def spiess_is_waiting_in_jerking_target(guild):
+    channel = guild.get_channel(JERKING_TARGET_CHANNEL_ID)
+    return (
+        channel is not None
+        and any(
+            not m.bot and member_is_spiess(m)
+            for m in channel.members
+        )
+    )
+
+
+def jerking_target_dm_is_running():
+    return jerking_target_dm_task is not None and not jerking_target_dm_task.done()
+
+
+def cancel_jerking_target_dm_task():
+    global jerking_target_dm_task
+    task = jerking_target_dm_task
+    jerking_target_dm_task = None
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def delete_jerking_target_dm_messages():
+    global jerking_target_dm_messages
+    messages = list(jerking_target_dm_messages)
+    jerking_target_dm_messages.clear()
+
+    for message in messages:
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def disconnect_all_spiess_from_jerking_target(guild):
+    channel = guild.get_channel(JERKING_TARGET_CHANNEL_ID)
+    if channel is None:
+        return
+
+    for member in list(channel.members):
+        if member.bot or not member_is_spiess(member):
+            continue
+        try:
+            await member.move_to(
+                None,
+                reason="Jerking-Erinnerung: Nicht jetzt"
+            )
+        except discord.Forbidden:
+            print(f"❌ {member} konnte nicht aus dem Sprachchannel getrennt werden.")
+        except discord.HTTPException as e:
+            print(f"❌ Fehler beim Trennen von {member}: {e}")
+
+
+class JerkingTargetNotNowButton(discord.ui.Button):
+    def __init__(self, message_type):
+        super().__init__(
+            label="Nicht jetzt",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"jerking_target_dm:not_now:{message_type}"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != JERKING_USER_ID:
+            await interaction.response.send_message(
+                "❌ Dieser Button ist nicht für dich.",
+                ephemeral=True
+            )
+            return
+
+        guild = bot.get_guild(GUILD_ID)
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ Der Server konnte nicht gefunden werden.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        # Loop sofort stoppen, dann wartende Spiess-Accounts trennen
+        # und anschließend alle zu dieser Erinnerung gehörenden DMs löschen.
+        cancel_jerking_target_dm_task()
+        await disconnect_all_spiess_from_jerking_target(guild)
+        await delete_jerking_target_dm_messages()
+
+
+class JerkingTargetDMView(discord.ui.View):
+    def __init__(self, message_type):
+        super().__init__(timeout=None)
+
+        link_label = "let's go" if message_type == "first" else "tut mir leid 😓"
+
+        self.add_item(
+            discord.ui.Button(
+                label=link_label,
+                style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{GUILD_ID}/{JERKING_TARGET_CHANNEL_ID}"
+            )
+        )
+        self.add_item(JerkingTargetNotNowButton(message_type))
+
+
+async def get_jerking_target_user():
+    user = bot.get_user(JERKING_USER_ID)
+    if user is not None:
+        return user
+
+    try:
+        return await bot.fetch_user(JERKING_USER_ID)
+    except (discord.NotFound, discord.HTTPException):
+        print("❌ JERKING_USER_ID konnte nicht gefunden werden.")
+        return None
+
+
+async def send_jerking_target_dm(content, message_type):
+    user = await get_jerking_target_user()
+    if user is None:
+        return False
+
+    try:
+        message = await user.send(
+            content,
+            view=JerkingTargetDMView(message_type)
+        )
+        jerking_target_dm_messages.append(message)
+        return True
+    except discord.Forbidden:
+        print("❌ DM an JERKING_USER_ID nicht möglich (DMs möglicherweise deaktiviert).")
+        return False
+    except discord.HTTPException as e:
+        print(f"❌ Fehler beim Senden der DM an JERKING_USER_ID: {e}")
+        return False
+
+
+def build_random_jerking_reminder():
+    return (
+        "Wie kannst du den spieSS nur so lange warten lassen, du "
+        f"{random.choice(ADJEKTIVE)} {random.choice(NOMEN)}💔"
+    )
+
+
+async def jerking_target_reminder_loop(guild):
+    global jerking_target_dm_task
+
+    try:
+        # Die erste Nachricht wurde bereits beim Join des Spiess gesendet.
+        # Exakt fünf Minuten bis zur ersten randomisierten Erinnerung warten.
+        await asyncio.sleep(JERKING_REMINDER_INTERVAL)
+
+        while True:
+            # Sobald niemand mit Spiess mehr wartet oder der Zieluser da ist: Ende.
+            if (
+                not spiess_is_waiting_in_jerking_target(guild)
+                or jerking_target_is_in_channel(guild)
+            ):
+                return
+
+            sent = await send_jerking_target_dm(
+                build_random_jerking_reminder(),
+                "reminder"
+            )
+            if not sent:
+                return
+
+            await asyncio.sleep(JERKING_REMINDER_INTERVAL)
+
+    except asyncio.CancelledError:
+        return
+
+    finally:
+        if jerking_target_dm_task is asyncio.current_task():
+            jerking_target_dm_task = None
+
+
+async def start_jerking_target_wait(guild):
+    global jerking_target_dm_task
+
+    # Nur eine Schleife, auch wenn mehrere Spiess-Accounts den Channel betreten.
+    if jerking_target_dm_is_running():
+        return
+
+    # Ist JERKING_USER_ID schon da, gibt es nichts zu erinnern.
+    if jerking_target_is_in_channel(guild):
+        return
+
+    sent = await send_jerking_target_dm(
+        "it's jerking time",
+        "first"
+    )
+    if not sent:
+        return
+
+    jerking_target_dm_task = asyncio.create_task(
+        jerking_target_reminder_loop(guild)
+    )
+# ==================================================================
+
+
 # ================== VOICE STATE ==================
 @bot.event
 async def on_voice_state_update(
@@ -1056,6 +1300,26 @@ async def on_voice_state_update(
         is_spiess = member_is_spiess(member)
 
         # --------------------------------------------------
+        # PRIVATE ERINNERUNG AN JERKING_USER_ID
+        # Ziel ist bewusst der Führerbunker/BUNKER_VOICE_CHANNEL_ID.
+        # --------------------------------------------------
+        if (
+            is_spiess
+            and after.channel.id == JERKING_TARGET_CHANNEL_ID
+            and member.id != JERKING_USER_ID
+        ):
+            await start_jerking_target_wait(member.guild)
+
+        # JERKING_USER_ID kommt in den Zielchannel:
+        # Loop stoppen und alle bisherigen Erinnerungs-DMs entfernen.
+        if (
+            member.id == JERKING_USER_ID
+            and after.channel.id == JERKING_TARGET_CHANNEL_ID
+        ):
+            cancel_jerking_target_dm_task()
+            await delete_jerking_target_dm_messages()
+
+        # --------------------------------------------------
         # BUNKER
         # --------------------------------------------------
         if (
@@ -1074,9 +1338,9 @@ async def on_voice_state_update(
                     BUNKER_MESSAGE,
                     "bunker"
                 )
-            await send_private_channel_dm_to_spiess(
-                member.guild, "bunker", BUNKER_VOICE_CHANNEL_ID, BUNKER_MESSAGE
-            )
+                await send_private_channel_dm_to_spiess(
+                    member.guild, "bunker", BUNKER_VOICE_CHANNEL_ID, BUNKER_MESSAGE
+                )
 
         # --------------------------------------------------
         # JERKING
@@ -1097,9 +1361,9 @@ async def on_voice_state_update(
                     JERKING_MESSAGE,
                     "jerking"
                 )
-            await send_private_channel_dm_to_spiess(
-                member.guild, "jerking", JERKING_VOICE_CHANNEL_ID, JERKING_MESSAGE
-            )
+                await send_private_channel_dm_to_spiess(
+                    member.guild, "jerking", JERKING_VOICE_CHANNEL_ID, JERKING_MESSAGE
+                )
 
         # Spiess betritt Bunker/Jerking:
         # Timer stoppen und nur die zugehörigen Meldungen löschen.
@@ -1114,8 +1378,9 @@ async def on_voice_state_update(
                     "bunker"
                 )
 
-                # Admin-Channel-Logik bleibt unverändert.
-                pass
+                # Ein Spiess ist jetzt selbst im Bunker:
+                # private Bunker-DMs bei ALLEN Spiess-Accounts löschen.
+                await delete_private_dm_group("bunker")
 
             elif after.channel.id == JERKING_VOICE_CHANNEL_ID:
                 cancel_voice_notification_timers(
@@ -1125,6 +1390,10 @@ async def on_voice_state_update(
                     member.guild,
                     "jerking"
                 )
+
+                # Ein Spiess ist jetzt selbst im Jerking-Channel:
+                # private Jerking-DMs bei ALLEN Spiess-Accounts löschen.
+                await delete_private_dm_group("jerking")
 
         # --------------------------------------------------
         # BWI-BEREICH
@@ -1140,19 +1409,32 @@ async def on_voice_state_update(
 
         if in_bwi_now:
             if is_spiess:
-                # Bestehende Admin-Channel-BWI-Meldungen aufräumen.
+                # Ein Spiess befindet sich jetzt im BWI-Bereich:
+                # Admin-Meldungen UND private BWI-DMs bei allen Spiess-Accounts löschen.
                 await delete_voice_notifications(member.guild, "bwi")
+                await delete_private_dm_group("bwi")
             else:
-                # Admin-Channel nur beim Eintritt von außerhalb.
-                if not was_in_bwi:
-                    await send_voice_notification(
-                        member.guild,
-                        f"{member.mention} ist dem BWI-Bereich beigetreten",
-                        "bwi"
-                    )
+                # Nur melden, solange KEIN Spiess irgendwo im BWI-Bereich ist.
+                spiess_in_bwi = any(
+                    member_is_spiess(guild_member)
+                    and guild_member.voice is not None
+                    and guild_member.voice.channel is not None
+                    and guild_member.voice.channel.id in BWI_VOICE_CHANNEL_IDS
+                    for guild_member in member.guild.members
+                    if not guild_member.bot
+                )
 
-                # Privat: Eintritt = neue DM; interner Channelwechsel = vorhandene DM editieren.
-                await send_or_update_bwi_dm(member.guild, member, after.channel)
+                if not spiess_in_bwi:
+                    # Admin-Channel nur beim Eintritt von außerhalb.
+                    if not was_in_bwi:
+                        await send_voice_notification(
+                            member.guild,
+                            f"{member.mention} ist dem BWI-Bereich beigetreten",
+                            "bwi"
+                        )
+
+                    # Privat: Eintritt = neue DM; interner Channelwechsel = vorhandene DM editieren.
+                    await send_or_update_bwi_dm(member.guild, member, after.channel)
 
     # BWI-User verlässt den überwachten Bereich vollständig:
     if (
@@ -1162,6 +1444,18 @@ async def on_voice_state_update(
         and not member_is_spiess(member)
     ):
         await clear_bwi_user_tracking(member.id)
+
+    # Wenn ein Spiess den Zielchannel verlässt und danach kein Spiess mehr dort wartet,
+    # Loop stoppen. Bereits gesendete DMs bleiben bestehen.
+    left_jerking_target = (
+        before.channel is not None
+        and before.channel.id == JERKING_TARGET_CHANNEL_ID
+        and (after.channel is None or after.channel.id != JERKING_TARGET_CHANNEL_ID)
+        and member_is_spiess(member)
+    )
+
+    if left_jerking_target and not spiess_is_waiting_in_jerking_target(member.guild):
+        cancel_jerking_target_dm_task()
 
     now = datetime.datetime.now(
         datetime.UTC
