@@ -107,7 +107,7 @@ NOMEN = [
     "Affe", "Elefant", "Pinguin", "Fisch", "Schwanz", "Idiot", "Holzkopf",
     "Lappen", "Vollpfosten", "Hohlkopf", "Trottel", "Clown", "Knecht",
     "Lauch", "Esel", "Ochse", "Gorilla", "Pavian", "Orang-Utan", "Nacktmull",
-    "Waschbär", "Wombat", "Seegurke", "Kröte", "Karpfen", "Thunfisch",
+    "Waschbär", "Wombat", "Seegurke", "Karpfen", "Thunfisch",
     "Gartenzwerg", "Mülleimer", "Klodeckel", "Toilettenbesen", "Abfluss",
     "Türstopper", "Bierdeckel", "Kartoffelsack", "Müllsack", "Duschvorhang",
     "Teppich", "Aschenbecher", "Klobürste", "Sockenhalter", "Hodenkobold",
