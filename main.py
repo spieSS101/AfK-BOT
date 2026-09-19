@@ -76,6 +76,7 @@ JERKING_MESSAGE = "Jerking Hours"
 GUILD_ID = 1486542167601184788
 
 BUNKER_DM_INTERVAL = 30
+BUNKER_TARGET_CHANNEL_ID = BUNKER_VOICE_CHANNEL_ID
 
 # Private Erinnerung an JERKING_USER_ID, wenn ein Spiess in der Alten Mühle wartet.
 JERKING_TARGET_CHANNEL_ID = JERKING_VOICE_CHANNEL_ID
@@ -191,7 +192,7 @@ private_voice_dm_tasks = {
     "jerking": None,
 }
 
-# Altbestand für die allgemeine DM-Löschlogik.
+# Private Erinnerung an BUNKER_USER_ID, wenn ein Spiess im Bunker wartet.
 bunker_dm_task = None
 bunker_dm_messages = []
 # =====================================================================
@@ -411,6 +412,8 @@ async def on_ready():
         bot.add_view(PrivateVoiceDMView("bunker", BUNKER_VOICE_CHANNEL_ID))
         bot.add_view(PrivateVoiceDMView("jerking", JERKING_VOICE_CHANNEL_ID))
         bot.add_view(BWIPrivateDMView(BWI_VOICE_CHANNEL_IDS[1486613172126355546], 1486613172126355546))
+        bot.add_view(BunkerTargetDMView("first"))
+        bot.add_view(BunkerTargetDMView("reminder"))
         bot.add_view(JerkingTargetDMView("first"))
         bot.add_view(JerkingTargetDMView("reminder"))
         bot.add_view(DeleteAllDMView())
@@ -876,7 +879,6 @@ class PrivateVoiceDMView(discord.ui.View):
             label = "Let's Jerk"
 
         self.add_item(DeleteAllDMButton())
-        self.add_item(PrivateNotNowButton(notification_type))
         self.add_item(
             discord.ui.Button(
                 label=label,
@@ -884,13 +886,13 @@ class PrivateVoiceDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
             )
         )
+        self.add_item(PrivateNotNowButton(notification_type))
 
 
 class BWIPrivateDMView(discord.ui.View):
     def __init__(self, channel_name, channel_id):
         super().__init__(timeout=None)
         self.add_item(DeleteAllDMButton())
-        self.add_item(PrivateNotNowButton("bwi"))
         self.add_item(
             discord.ui.Button(
                 label="Zum Channel",
@@ -898,6 +900,7 @@ class BWIPrivateDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{channel_id}"
             )
         )
+        self.add_item(PrivateNotNowButton("bwi"))
 
 
 async def send_private_channel_dm_to_spiess(guild, notification_type, channel_id, message_text):
@@ -962,6 +965,206 @@ async def clear_bwi_user_tracking(watched_member_id):
         if key[1] == watched_member_id:
             bwi_user_dm_messages.pop(key, None)
 
+
+
+# ================== PRIVATE DM AN BUNKER_USER_ID ==================
+def bunker_target_is_in_channel(guild):
+    channel = guild.get_channel(BUNKER_TARGET_CHANNEL_ID)
+    return (
+        channel is not None
+        and any(m.id == BUNKER_USER_ID for m in channel.members)
+    )
+
+
+def spiess_is_waiting_in_bunker_target(guild):
+    channel = guild.get_channel(BUNKER_TARGET_CHANNEL_ID)
+    return (
+        channel is not None
+        and any(
+            not m.bot and member_is_spiess(m)
+            for m in channel.members
+        )
+    )
+
+
+def bunker_target_dm_is_running():
+    return bunker_dm_task is not None and not bunker_dm_task.done()
+
+
+def cancel_bunker_target_dm_task():
+    global bunker_dm_task
+    task = bunker_dm_task
+    bunker_dm_task = None
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def delete_bunker_target_dm_messages():
+    global bunker_dm_messages
+    messages = list(bunker_dm_messages)
+    bunker_dm_messages.clear()
+
+    for message in messages:
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def get_bunker_target_user():
+    user = bot.get_user(BUNKER_USER_ID)
+    if user is not None:
+        return user
+
+    try:
+        return await bot.fetch_user(BUNKER_USER_ID)
+    except (discord.NotFound, discord.HTTPException):
+        print("❌ BUNKER_USER_ID konnte nicht gefunden werden.")
+        return None
+
+
+async def disconnect_all_spiess_from_bunker_target(guild):
+    channel = guild.get_channel(BUNKER_TARGET_CHANNEL_ID)
+    if channel is None:
+        return
+
+    for member in list(channel.members):
+        if member.bot or not member_is_spiess(member):
+            continue
+        try:
+            await member.move_to(
+                None,
+                reason="Bunker-Erinnerung: Nicht jetzt"
+            )
+        except discord.Forbidden:
+            print(f"❌ {member} konnte nicht aus dem Bunker getrennt werden.")
+        except discord.HTTPException as e:
+            print(f"❌ Fehler beim Trennen von {member} aus dem Bunker: {e}")
+
+
+class BunkerTargetNotNowButton(discord.ui.Button):
+    def __init__(self, message_type):
+        super().__init__(
+            label="Nicht jetzt",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"bunker_target_dm:not_now:{message_type}"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != BUNKER_USER_ID:
+            await interaction.response.send_message(
+                "❌ Dieser Button ist nicht für dich.",
+                ephemeral=True
+            )
+            return
+
+        guild = bot.get_guild(GUILD_ID)
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ Der Server konnte nicht gefunden werden.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer()
+
+        # Loop sofort stoppen, alle wartenden Spiess-Accounts aus dem
+        # Bunker trennen und anschließend die Bunker-Erinnerungs-DMs löschen.
+        cancel_bunker_target_dm_task()
+        await disconnect_all_spiess_from_bunker_target(guild)
+        await delete_bunker_target_dm_messages()
+
+
+class BunkerTargetDMView(discord.ui.View):
+    def __init__(self, message_type):
+        super().__init__(timeout=None)
+
+        link_label = "Zum Bunker" if message_type == "first" else "Zum Bunker"
+
+        self.add_item(DeleteAllDMButton())
+        self.add_item(
+            discord.ui.Button(
+                label=link_label,
+                style=discord.ButtonStyle.link,
+                url=f"https://discord.com/channels/{GUILD_ID}/{BUNKER_TARGET_CHANNEL_ID}"
+            )
+        )
+        self.add_item(BunkerTargetNotNowButton(message_type))
+
+
+async def send_bunker_target_dm(content, message_type):
+    user = await get_bunker_target_user()
+    if user is None:
+        return False
+
+    try:
+        message = await user.send(
+            content,
+            view=BunkerTargetDMView(message_type)
+        )
+        bunker_dm_messages.append(message)
+        return True
+    except discord.Forbidden:
+        print("❌ DM an BUNKER_USER_ID nicht möglich (DMs möglicherweise deaktiviert).")
+        return False
+    except discord.HTTPException as e:
+        print(f"❌ Fehler beim Senden der DM an BUNKER_USER_ID: {e}")
+        return False
+
+
+async def bunker_target_reminder_loop(guild):
+    global bunker_dm_task
+
+    try:
+        while True:
+            await asyncio.sleep(BUNKER_DM_INTERVAL)
+
+            # Letzter Spiess weg -> nur Loop beenden, vorhandene DMs bleiben bestehen.
+            if not spiess_is_waiting_in_bunker_target(guild):
+                return
+
+            # Zieluser ist inzwischen da -> Loop endet.
+            # Das Voice-Event löscht zusätzlich die bisherigen Erinnerungs-DMs.
+            if bunker_target_is_in_channel(guild):
+                return
+
+            sent = await send_bunker_target_dm(
+                "Bunkerzeit",
+                "reminder"
+            )
+            if not sent:
+                return
+
+    except asyncio.CancelledError:
+        return
+
+    finally:
+        if bunker_dm_task is asyncio.current_task():
+            bunker_dm_task = None
+
+
+async def start_bunker_target_wait(guild):
+    global bunker_dm_task
+
+    # Nur ein Loop, auch wenn mehrere Spiess-Accounts den Bunker betreten.
+    if bunker_target_dm_is_running():
+        return
+
+    # Ist BUNKER_USER_ID schon da, gibt es nichts zu erinnern.
+    if bunker_target_is_in_channel(guild):
+        return
+
+    sent = await send_bunker_target_dm(
+        "Bunkerzeit",
+        "first"
+    )
+    if not sent:
+        return
+
+    bunker_dm_task = asyncio.create_task(
+        bunker_target_reminder_loop(guild)
+    )
+# ==================================================================
 
 
 # ================== PRIVATE DM AN JERKING_USER_ID ==================
@@ -1067,7 +1270,6 @@ class JerkingTargetDMView(discord.ui.View):
         link_label = "let's go" if message_type == "first" else "tut mir leid 😓"
 
         self.add_item(DeleteAllDMButton())
-        self.add_item(JerkingTargetNotNowButton(message_type))
         self.add_item(
             discord.ui.Button(
                 label=link_label,
@@ -1075,6 +1277,7 @@ class JerkingTargetDMView(discord.ui.View):
                 url=f"https://discord.com/channels/{GUILD_ID}/{JERKING_TARGET_CHANNEL_ID}"
             )
         )
+        self.add_item(JerkingTargetNotNowButton(message_type))
 
 
 async def get_jerking_target_user():
@@ -1205,6 +1408,25 @@ async def on_voice_state_update(
         is_spiess = member_is_spiess(member)
 
         # --------------------------------------------------
+        # PRIVATE ERINNERUNG AN BUNKER_USER_ID
+        # --------------------------------------------------
+        if (
+            is_spiess
+            and after.channel.id == BUNKER_TARGET_CHANNEL_ID
+            and member.id != BUNKER_USER_ID
+        ):
+            await start_bunker_target_wait(member.guild)
+
+        # BUNKER_USER_ID kommt in den Zielchannel:
+        # Loop stoppen und alle bisherigen Erinnerungs-DMs entfernen.
+        if (
+            member.id == BUNKER_USER_ID
+            and after.channel.id == BUNKER_TARGET_CHANNEL_ID
+        ):
+            cancel_bunker_target_dm_task()
+            await delete_bunker_target_dm_messages()
+
+        # --------------------------------------------------
         # PRIVATE ERINNERUNG AN JERKING_USER_ID
         # Ziel ist bewusst die Alte Mühle/JERKING_VOICE_CHANNEL_ID.
         # --------------------------------------------------
@@ -1324,32 +1546,19 @@ async def on_voice_state_update(
 
     if left_jerking_target and not spiess_is_waiting_in_jerking_target(member.guild):
         cancel_jerking_target_dm_task()
-        await delete_jerking_target_dm_messages()
 
     # Wenn der letzte Spiess den Führerbunker verlässt:
-    # auch eventuell gespeicherte private Nachrichten an BUNKER_USER_ID löschen.
+    # nur den BUNKER_USER_ID-Erinnerungsloop stoppen.
+    # Bereits gesendete DMs bleiben bestehen.
     left_bunker_private_target = (
         before.channel is not None
-        and before.channel.id == BUNKER_VOICE_CHANNEL_ID
-        and (after.channel is None or after.channel.id != BUNKER_VOICE_CHANNEL_ID)
+        and before.channel.id == BUNKER_TARGET_CHANNEL_ID
+        and (after.channel is None or after.channel.id != BUNKER_TARGET_CHANNEL_ID)
         and member_is_spiess(member)
     )
 
-    if left_bunker_private_target:
-        bunker_channel = member.guild.get_channel(BUNKER_VOICE_CHANNEL_ID)
-        if bunker_channel is not None and not channel_has_spiess(bunker_channel):
-            # Bestehende private Spiess-Gruppenmeldungen ebenfalls aufräumen.
-            await delete_private_dm_group("bunker")
-
-            # Falls aus der älteren Bunker-Zieluser-Logik noch Nachrichten
-            # in bunker_dm_messages gespeichert sind, diese ebenfalls löschen.
-            messages = list(bunker_dm_messages)
-            bunker_dm_messages.clear()
-            for message in messages:
-                try:
-                    await message.delete()
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    pass
+    if left_bunker_private_target and not spiess_is_waiting_in_bunker_target(member.guild):
+        cancel_bunker_target_dm_task()
 
     now = datetime.datetime.now(
         datetime.UTC
@@ -1482,8 +1691,8 @@ async def check_inactivity():
 # ==================================================
 
 
-# ================== DM-"LÖSCHEN" ==================
-# "löschen" in einer DM:
+# ================== DM-LÖSCHUNG ÜBER MÜLLEIMER ==================
+# Der 🗑️-Button löscht ausschließlich Nachrichten dieses Bots.
 # - normaler Nutzer: nur die Bot-Nachrichten in seinem DM
 # - Spiess: Bot-Nachrichten in den DMs aller Spiess-Accounts
 #
@@ -1702,9 +1911,9 @@ async def delete_bot_dm_messages_for_user(user):
     return total
 
 
-async def delete_dm_for_trigger_user(trigger_user, source="löschen"):
+async def delete_dm_for_trigger_user(trigger_user, source="🗑️"):
     """
-    Gemeinsame Löschlogik für Textkommando und 🗑️-Button.
+    Löschlogik für den 🗑️-Button.
     Spiess -> alle Spiess-DMs, sonst nur der eigene DM.
     """
     trigger_is_spiess = await user_is_spiess_by_id(trigger_user.id)
@@ -1772,30 +1981,6 @@ class DeleteAllDMView(discord.ui.View):
         self.add_item(DeleteAllDMButton())
 
 
-async def handle_delete_dm_command(message):
-    # Nur echte Privatnachrichten von Nutzern.
-    if message.guild is not None or message.author.bot:
-        return False
-
-    if message.content.strip().casefold() != "löschen":
-        return False
-
-    await delete_dm_for_trigger_user(
-        message.author,
-        source="'löschen'"
-    )
-
-    # Keine Bestätigungs-DM senden, sonst wäre der Chat direkt wieder nicht leer.
-    # Die Nutzer-Nachricht "löschen" selbst kann der Bot nicht löschen.
-    return True
-
-@bot.event
-async def on_message(message):
-    handled = await handle_delete_dm_command(message)
-    if handled:
-        return
-
-    await bot.process_commands(message)
 
 # ============================================================
 
