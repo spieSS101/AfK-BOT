@@ -1314,7 +1314,7 @@ async def send_jerking_target_dm(content, message_type):
 
 def build_random_jerking_reminder():
     return (
-        "Wie kannst du spieSS so lange warten lassen, du "
+        "Wie kannst du den spieSS nur so lange warten lassen, du "
         f"{random.choice(ADJEKTIVE)} {random.choice(NOMEN)}💔"
     )
 
