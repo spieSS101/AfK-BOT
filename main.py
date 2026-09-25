@@ -82,9 +82,9 @@ BUNKER_TARGET_CHANNEL_ID = BUNKER_VOICE_CHANNEL_ID
 JERKING_TARGET_CHANNEL_ID = JERKING_VOICE_CHANNEL_ID
 
 # Jede Wiederholung bekommt einen neuen zufälligen Abstand:
-# mindestens 3:47 Minuten, höchstens 5:00 Minuten.
-JERKING_REMINDER_MIN_INTERVAL = 3 * 60 + 47
-JERKING_REMINDER_MAX_INTERVAL = 5 * 60
+# mindestens 1:00 Minute, höchstens 2:00 Minuten.
+JERKING_REMINDER_MIN_INTERVAL = 1 * 60
+JERKING_REMINDER_MAX_INTERVAL = 2 * 60
 
 def get_random_jerking_reminder_interval():
     return random.randint(
@@ -1325,7 +1325,7 @@ async def jerking_target_reminder_loop(guild):
     try:
         # Die erste Nachricht wurde bereits beim Join des Spiess gesendet.
         # Vor JEDER Erinnerung einen neuen zufälligen Abstand zwischen
-        # 3:47 Minuten und 5:00 Minuten wählen.
+        # 1:00 Minute und 2:00 Minuten wählen.
         while True:
             delay = get_random_jerking_reminder_interval()
             print(
