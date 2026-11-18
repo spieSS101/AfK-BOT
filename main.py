@@ -62,6 +62,8 @@ ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
 
 
 SPIESS_ROLE_ID = 1486560941368803389
+RATSMITGLIED_ROLE_ID = 1486552582397759499
+VANILLA_ROLE_ID = 1486551681490747483
 
 BUNKER_VOICE_CHANNEL_ID = 1486574554900987986
 JERKING_VOICE_CHANNEL_ID = 1529300838688882812
@@ -748,6 +750,29 @@ async def on_member_join(member):
                             f"❌ Discord-Fehler beim "
                             f"Vergeben von BWI an {member}: {e}"
                         )
+
+                # Vanilla bei Einladung durch SpieSS oder Ratsmitglied vergeben.
+                if any(
+                    role.id in (SPIESS_ROLE_ID, RATSMITGLIED_ROLE_ID)
+                    for role in inviter_member.roles
+                ):
+                    vanilla_role = guild.get_role(VANILLA_ROLE_ID)
+                    if vanilla_role is None:
+                        print(f"❌ Vanilla-Rolle mit ID {VANILLA_ROLE_ID} wurde nicht gefunden.")
+                    elif vanilla_role not in member.roles:
+                        try:
+                            await member.add_roles(
+                                vanilla_role,
+                                reason=f"Vanilla automatisch über Invite von {inviter_member}"
+                            )
+                            print(
+                                f"✅ Vanilla übernommen: {inviter_member} → {member} "
+                                f"(Invite: {used_invite.code})"
+                            )
+                        except discord.Forbidden:
+                            print(f"❌ Vanilla konnte {member} nicht gegeben werden.")
+                        except discord.HTTPException as e:
+                            print(f"❌ Discord-Fehler beim Vergeben von Vanilla an {member}: {e}")
 
     # ==================================================
     # 2. DANACH ADMIN-NACHRICHT MIT AKTUELLEN ROLLEN
