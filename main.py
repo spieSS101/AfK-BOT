@@ -417,7 +417,6 @@ class NicknameModal(discord.ui.Modal, title="Nickname ändern"):
             )
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
-        await interaction.followup.send("✅ Nickname geändert.", ephemeral=True)
 
 
 class NicknameButton(discord.ui.Button):
