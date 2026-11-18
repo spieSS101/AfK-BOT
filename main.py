@@ -462,7 +462,9 @@ class MemberRoleView(discord.ui.LayoutView):
         # Components V2: Der Nickname-Button steht direkt unter dem Benutzernamen.
         panel = discord.ui.Container()
         panel.add_item(discord.ui.TextDisplay(
-            f"👤 **Neuer Benutzer:** {target_member.mention}\n`{target_member}`"
+            f"👤 **Neuer Benutzer:** {target_member.mention}\n"
+            f"`{target_member}`"
+            + (f" — Nickname: **{discord.utils.escape_markdown(target_member.nick)}**" if target_member.nick else "")
         ))
         panel.add_item(discord.ui.ActionRow(NicknameButton()))
         panel.add_item(discord.ui.TextDisplay(
@@ -632,12 +634,24 @@ async def reconcile_admin_messages():
 async def on_member_update(before, after):
     if before.guild.id != GUILD_ID:
         return
-    if {role.id for role in before.roles} == {role.id for role in after.roles}:
+    roles_changed = {role.id for role in before.roles} != {role.id for role in after.roles}
+    nickname_changed = before.nick != after.nick
+    if not roles_changed and not nickname_changed:
         return
     if not admin_messages_initialized:
         return
     async with admin_messages_lock:
         await sync_admin_message(after)
+        if nickname_changed:
+            message_id = admin_messages.get(str(after.id))
+            if message_id is not None:
+                channel = await get_admin_channel(after.guild)
+                if channel is not None:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                        await message.edit(view=MemberRoleView(after), allowed_mentions=discord.AllowedMentions.none())
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+                        print(f"❌ Nickname-Anzeige für {after} nicht aktualisierbar: {error}")
 
 
 @bot.event
