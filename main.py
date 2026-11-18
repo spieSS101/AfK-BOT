@@ -359,22 +359,110 @@ class RoleSelect(discord.ui.Select):
         # Nur dieselbe ursprüngliche Nachricht aktualisieren:
         # keine Erfolgs-/Auswahl-Benachrichtigung und das Dropdown bleibt erhalten.
         await interaction.response.edit_message(
-            content=build_admin_role_message(member),
             view=MemberRoleView(member)
         )
 
 
-class MemberRoleView(discord.ui.View):
+class NicknameModal(discord.ui.Modal, title="Nickname ändern"):
+
+    new_nickname = discord.ui.TextInput(
+        label="Neuer Server-Nickname",
+        placeholder="Neuen Nickname eingeben...",
+        min_length=1,
+        max_length=32
+    )
+
+    def __init__(self, target_member_id, admin_message):
+        super().__init__()
+        self.target_member_id = target_member_id
+        self.admin_message = admin_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Du darfst den Nickname nicht ändern.", ephemeral=True
+            )
+            return
+
+        try:
+            member = await interaction.guild.fetch_member(self.target_member_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message(
+                "❌ Der Benutzer konnte nicht gefunden werden.", ephemeral=True
+            )
+            return
+
+        try:
+            await member.edit(
+                nick=str(self.new_nickname.value).strip(),
+                reason=f"Nickname geändert durch {interaction.user}"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Der Bot darf diesen Nickname nicht ändern. Prüfe seine Berechtigung und Rollenposition.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "❌ Discord-Fehler beim Ändern des Nicknames.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            member = await interaction.guild.fetch_member(member.id)
+            await self.admin_message.edit(
+                view=MemberRoleView(member)
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+        await interaction.followup.send("✅ Nickname geändert.", ephemeral=True)
+
+
+class NicknameButton(discord.ui.Button):
+
+    def __init__(self):
+        super().__init__(
+            label="Nickname ändern",
+            emoji="✏️",
+            style=discord.ButtonStyle.secondary,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Du darfst den Nickname nicht ändern.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(
+            NicknameModal(self.view.target_member_id, interaction.message)
+        )
+
+
+class MemberRoleView(discord.ui.LayoutView):
 
     def __init__(self, target_member):
         # 24 Stunden Zeit für die Rollenverwaltung
         super().__init__(timeout=86400)
 
         self.target_member_id = target_member.id
+        role_names = get_managed_role_names(target_member)
+        roles_text = ", ".join(role_names) if role_names else "Keine"
 
-        self.add_item(
-            RoleSelect(target_member)
-        )
+        # Components V2: Der Nickname-Button steht direkt unter dem Benutzernamen.
+        panel = discord.ui.Container()
+        panel.add_item(discord.ui.TextDisplay(
+            f"👤 **Neuer Benutzer:** {target_member.mention}\n`{target_member}`"
+        ))
+        panel.add_item(discord.ui.ActionRow(NicknameButton()))
+        panel.add_item(discord.ui.TextDisplay(
+            f"**Aktuelle Rollen:** {roles_text}\n\n"
+            "Welche Rolle(n) soll der Benutzer erhalten?"
+        ))
+        panel.add_item(discord.ui.ActionRow(RoleSelect(target_member)))
+        self.add_item(panel)
 
 
 # ============================================================
@@ -682,7 +770,6 @@ async def on_member_join(member):
         try:
 
             await admin_channel.send(
-                content=build_admin_role_message(member),
                 view=MemberRoleView(member)
             )
 
