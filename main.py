@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 import os
+import json
 import asyncio
 import random
 import threading
@@ -59,6 +60,10 @@ BWI_ROLE_ID = 1486613262953877645
 
 # Admin-Channel für Rollenvergabe
 ADMIN_ROLE_CHANNEL_ID = 1549364249317351434
+ADMIN_MESSAGES_FILE = "/opt/discordbot/admin_messages.json"
+admin_messages = {}
+admin_messages_lock = asyncio.Lock()
+admin_messages_initialized = False
 
 
 SPIESS_ROLE_ID = 1486560941368803389
@@ -258,7 +263,8 @@ class RoleSelect(discord.ui.Select):
             placeholder="Rolle(n) verwalten...",
             min_values=0,
             max_values=len(options),
-            options=options
+            options=options,
+            custom_id=f"admin_roles:{target_member.id}"
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -428,6 +434,7 @@ class NicknameButton(discord.ui.Button):
             label="Nickname ändern",
             emoji="✏️",
             style=discord.ButtonStyle.secondary,
+            custom_id="admin_nickname:open"
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -445,8 +452,8 @@ class NicknameButton(discord.ui.Button):
 class MemberRoleView(discord.ui.LayoutView):
 
     def __init__(self, target_member):
-        # 24 Stunden Zeit für die Rollenverwaltung
-        super().__init__(timeout=86400)
+        # Persistentes Admin-Menü ohne zeitliche Begrenzung.
+        super().__init__(timeout=None)
 
         self.target_member_id = target_member.id
         role_names = get_managed_role_names(target_member)
@@ -464,6 +471,198 @@ class MemberRoleView(discord.ui.LayoutView):
         ))
         panel.add_item(discord.ui.ActionRow(RoleSelect(target_member)))
         self.add_item(panel)
+
+
+# ================== DAUERHAFTE ADMIN-NACHRICHTEN ==================
+def load_admin_messages():
+    # Beim ersten Start ohne Datei wird die Zuordnung automatisch aufgebaut.
+    try:
+        with open(ADMIN_MESSAGES_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if not isinstance(data, dict):
+            raise ValueError("Ungültiges JSON-Format")
+        return {str(int(user_id)): int(message_id)
+                for user_id, message_id in data.items()}
+    except FileNotFoundError:
+        return {}
+    except (ValueError, TypeError, OSError) as error:
+        # Nicht mit leerem Stand fortfahren: Das würde Duplikate erzeugen.
+        print(f"❌ Admin-Nachrichten-Datei konnte nicht geladen werden: {error}")
+        return None
+
+
+def save_admin_messages():
+    # Atomar schreiben, damit ein Abbruch die Datei nicht halb überschreibt.
+    temp_path = ADMIN_MESSAGES_FILE + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(admin_messages, file, indent=2)
+        os.replace(temp_path, ADMIN_MESSAGES_FILE)
+    except OSError as error:
+        print(f"❌ Admin-Nachrichten-Datei konnte nicht gespeichert werden: {error}")
+        raise
+
+
+async def get_admin_channel(guild):
+    channel = guild.get_channel(ADMIN_ROLE_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(ADMIN_ROLE_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+    return channel
+
+
+async def sync_admin_message(member):
+    # Wird ausschließlich unter admin_messages_lock aufgerufen.
+    if member.guild.id != GUILD_ID:
+        return
+    channel = await get_admin_channel(member.guild)
+    if channel is None:
+        print("❌ Admin-Rollen-Channel konnte nicht gefunden werden.")
+        return
+
+    key = str(member.id)
+    message_id = admin_messages.get(key)
+    excluded = member.bot or any(role.id == SPIESS_ROLE_ID for role in member.roles)
+
+    if excluded:
+        if message_id is not None:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except (discord.Forbidden, discord.HTTPException) as error:
+                print(f"❌ Admin-Nachricht für {member} nicht löschbar: {error}")
+                return
+            bot.remove_view(message_id=message_id)
+            admin_messages.pop(key, None)
+            save_admin_messages()
+        return
+
+    if message_id is not None:
+        try:
+            await channel.fetch_message(message_id)
+            return
+        except discord.NotFound:
+            bot.remove_view(message_id=message_id)
+            admin_messages.pop(key, None)
+            save_admin_messages()
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"❌ Admin-Nachricht für {member} nicht prüfbar: {error}")
+            return
+
+    try:
+        message = await channel.send(
+            view=MemberRoleView(member),
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+        admin_messages[key] = message.id
+        save_admin_messages()
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(f"❌ Admin-Nachricht für {member} konnte nicht erstellt werden: {error}")
+
+
+async def reconcile_admin_messages():
+    global admin_messages, admin_messages_initialized
+    async with admin_messages_lock:
+        if admin_messages_initialized:
+            return
+        guild = bot.get_guild(GUILD_ID)
+        if guild is None:
+            return
+        loaded = load_admin_messages()
+        if loaded is None:
+            return
+        admin_messages = loaded
+        if not os.path.exists(ADMIN_MESSAGES_FILE):
+            save_admin_messages()
+        channel = await get_admin_channel(guild)
+        if channel is None:
+            print("❌ Admin-Rollen-Channel konnte nicht gefunden werden.")
+            return
+
+        # Die komplette Mitgliederliste abrufen, auch wenn der Cache unvollständig ist.
+        try:
+            members = [member async for member in guild.fetch_members(limit=None)]
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"❌ Mitgliederliste für Admin-Abgleich nicht verfügbar: {error}")
+            return
+        members_by_id = {member.id: member for member in members}
+
+        # Bestehende Nachrichten auf dauerhafte Komponenten umstellen und registrieren.
+        for key, message_id in list(admin_messages.items()):
+            member = members_by_id.get(int(key))
+            if member is None:
+                try:
+                    await (await channel.fetch_message(message_id)).delete()
+                except discord.NotFound:
+                    pass
+                except (discord.Forbidden, discord.HTTPException) as error:
+                    print(f"❌ Verwaiste Admin-Nachricht nicht löschbar: {error}")
+                    continue
+                admin_messages.pop(key, None)
+                save_admin_messages()
+                continue
+            if member.bot or any(role.id == SPIESS_ROLE_ID for role in member.roles):
+                await sync_admin_message(member)
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+                view = MemberRoleView(member)
+                # Bei jedem Neustart bestehende Komponenten aktualisieren und registrieren.
+                # Es wird keine neue Nachricht gesendet.
+                await message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+                bot.add_view(view, message_id=message_id)
+            except discord.NotFound:
+                admin_messages.pop(key, None)
+                save_admin_messages()
+            except (discord.Forbidden, discord.HTTPException) as error:
+                print(f"❌ Admin-Menü für {member} nicht wiederherstellbar: {error}")
+
+        # Nur fehlende Admin-Nachrichten erstellen.
+        for member in members:
+            await sync_admin_message(member)
+        admin_messages_initialized = True
+        print(f"✅ Admin-Nachrichten abgeglichen: {len(admin_messages)}", flush=True)
+
+
+@bot.event
+async def on_member_update(before, after):
+    if before.guild.id != GUILD_ID:
+        return
+    if {role.id for role in before.roles} == {role.id for role in after.roles}:
+        return
+    if not admin_messages_initialized:
+        return
+    async with admin_messages_lock:
+        await sync_admin_message(after)
+
+
+@bot.event
+async def on_member_remove(member):
+    if member.guild.id != GUILD_ID or not admin_messages_initialized:
+        return
+    async with admin_messages_lock:
+        # Ein ausgetretenes Mitglied bekommt keine neue Admin-Nachricht.
+        key = str(member.id)
+        message_id = admin_messages.get(key)
+        if message_id is None:
+            return
+        channel = await get_admin_channel(member.guild)
+        if channel is None:
+            return
+        try:
+            await (await channel.fetch_message(message_id)).delete()
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"❌ Admin-Nachricht beim Austritt nicht löschbar: {error}")
+            return
+        bot.remove_view(message_id=message_id)
+        admin_messages.pop(key, None)
+        save_admin_messages()
 
 
 # ============================================================
@@ -507,6 +706,8 @@ async def on_ready():
         bot.add_view(JerkingTargetDMView("reminder"))
         bot.add_view(DeleteAllDMView())
         bot._notification_views_registered = True
+
+    await reconcile_admin_messages()
 
     # Aktuelle Invite-Zähler aller Server laden
     for guild in bot.guilds:
@@ -785,31 +986,9 @@ async def on_member_join(member):
     except discord.HTTPException:
         pass
 
-    admin_channel = guild.get_channel(
-        ADMIN_ROLE_CHANNEL_ID
-    )
-
-    if admin_channel is not None:
-
-        try:
-
-            await admin_channel.send(
-                view=MemberRoleView(member)
-            )
-
-        except discord.Forbidden:
-
-            print(
-                "❌ Bot kann keine Nachricht in den "
-                "Admin-Rollen-Channel senden."
-            )
-
-        except discord.HTTPException as e:
-
-            print(
-                f"❌ Fehler beim Erstellen des "
-                f"Admin-Rollen-Menüs: {e}"
-            )
+    if admin_messages_initialized:
+        async with admin_messages_lock:
+            await sync_admin_message(member)
 
 # ==================================================
 
