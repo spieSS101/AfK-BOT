@@ -546,11 +546,7 @@ async def sync_admin_message(member):
     if message_id is not None:
         try:
             message = await channel.fetch_message(message_id)
-            # Vorhandene Anzeige (Nickname und Rollen) direkt aktualisieren.
-            await message.edit(
-                view=MemberRoleView(member),
-                allowed_mentions=discord.AllowedMentions.none()
-            )
+            await message.edit(view=MemberRoleView(member), allowed_mentions=discord.AllowedMentions.none())
             return
         except discord.NotFound:
             bot.remove_view(message_id=message_id)
@@ -590,18 +586,14 @@ async def reconcile_admin_messages():
             print("❌ Admin-Rollen-Channel konnte nicht gefunden werden.")
             return
 
-        # Member-Cache füllen, damit on_member_update auch für bereits
-        # vorhandene Mitglieder sofort Rollen- und Nickname-Änderungen erkennt.
-        try:
-            await guild.chunk(cache=True)
-        except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"⚠️ Member-Cache konnte nicht vollständig geladen werden: {error}")
-
-        # Die komplette Mitgliederliste abrufen, auch wenn der Cache unvollständig ist.
+        # Die komplette Mitgliederliste abrufen. Bei einem API-Fehler den Cache nutzen.
         try:
             members = [member async for member in guild.fetch_members(limit=None)]
         except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"❌ Mitgliederliste für Admin-Abgleich nicht verfügbar: {error}")
+            print(f"⚠️ Mitgliederabruf fehlgeschlagen, nutze Cache: {error}", flush=True)
+            members = list(guild.members)
+        if not members:
+            print("❌ Keine Mitglieder verfügbar; Admin-Abgleich wird später erneut versucht.", flush=True)
             return
         members_by_id = {member.id: member for member in members}
 
@@ -653,7 +645,6 @@ async def on_member_update(before, after):
     if not admin_messages_initialized:
         return
     async with admin_messages_lock:
-        # Holt den aktuellen Stand von Discord, auch bei veraltetem Member-Cache.
         try:
             after = await after.guild.fetch_member(after.id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -728,7 +719,23 @@ async def on_ready():
         bot.add_view(DeleteAllDMView())
         bot._notification_views_registered = True
 
-    await reconcile_admin_messages()
+    try:
+        await reconcile_admin_messages()
+    except Exception as error:
+        print(f"❌ Unerwarteter Fehler beim Admin-Abgleich: {type(error).__name__}: {error}", flush=True)
+
+    # Mitglieder-Cache im Hintergrund laden, damit Rollenänderungen erkannt werden.
+    if not getattr(bot, "_admin_cache_task_started", False):
+        bot._admin_cache_task_started = True
+        async def fill_admin_member_cache():
+            guild = bot.get_guild(GUILD_ID)
+            if guild is None:
+                return
+            try:
+                await asyncio.wait_for(guild.chunk(cache=True), timeout=45)
+            except (asyncio.TimeoutError, discord.Forbidden, discord.HTTPException) as error:
+                print(f"⚠️ Mitglieder-Cache nicht vollständig geladen: {error}", flush=True)
+        asyncio.create_task(fill_admin_member_cache())
 
     # Aktuelle Invite-Zähler aller Server laden
     for guild in bot.guilds:
