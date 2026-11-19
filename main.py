@@ -536,7 +536,6 @@ async def sync_admin_message(member):
             except (discord.Forbidden, discord.HTTPException) as error:
                 print(f"❌ Admin-Nachricht für {member} nicht löschbar: {error}")
                 return
-            bot.remove_view(message_id=message_id)
             admin_messages.pop(key, None)
             save_admin_messages()
         return
@@ -546,7 +545,6 @@ async def sync_admin_message(member):
             await channel.fetch_message(message_id)
             return
         except discord.NotFound:
-            bot.remove_view(message_id=message_id)
             admin_messages.pop(key, None)
             save_admin_messages()
         except (discord.Forbidden, discord.HTTPException) as error:
@@ -674,7 +672,6 @@ async def on_member_remove(member):
         except (discord.Forbidden, discord.HTTPException) as error:
             print(f"❌ Admin-Nachricht beim Austritt nicht löschbar: {error}")
             return
-        bot.remove_view(message_id=message_id)
         admin_messages.pop(key, None)
         save_admin_messages()
 
