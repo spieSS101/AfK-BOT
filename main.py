@@ -464,7 +464,8 @@ class MemberRoleView(discord.ui.LayoutView):
         panel.add_item(discord.ui.TextDisplay(
             f"👤 **Neuer Benutzer:** {target_member.mention}\n"
             f"`{target_member}`"
-            + (f" — Nickname: **{discord.utils.escape_markdown(target_member.nick)}**" if target_member.nick else "")
+            + (f" — Nickname: **{discord.utils.escape_markdown(target_member.display_name)}**"
+               if target_member.display_name != target_member.name else "")
         ))
         panel.add_item(discord.ui.ActionRow(NicknameButton()))
         panel.add_item(discord.ui.TextDisplay(
@@ -545,12 +546,7 @@ async def sync_admin_message(member):
 
     if message_id is not None:
         try:
-            message = await channel.fetch_message(message_id)
-            # Vorhandene Anzeige (Nickname und Rollen) direkt aktualisieren.
-            await message.edit(
-                view=MemberRoleView(member),
-                allowed_mentions=discord.AllowedMentions.none()
-            )
+            await channel.fetch_message(message_id)
             return
         except discord.NotFound:
             bot.remove_view(message_id=message_id)
@@ -589,13 +585,6 @@ async def reconcile_admin_messages():
         if channel is None:
             print("❌ Admin-Rollen-Channel konnte nicht gefunden werden.")
             return
-
-        # Member-Cache füllen, damit on_member_update auch für bereits
-        # vorhandene Mitglieder sofort Rollen- und Nickname-Änderungen erkennt.
-        try:
-            await guild.chunk(cache=True)
-        except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"⚠️ Member-Cache konnte nicht vollständig geladen werden: {error}")
 
         # Die komplette Mitgliederliste abrufen, auch wenn der Cache unvollständig ist.
         try:
@@ -653,12 +642,17 @@ async def on_member_update(before, after):
     if not admin_messages_initialized:
         return
     async with admin_messages_lock:
-        # Holt den aktuellen Stand von Discord, auch bei veraltetem Member-Cache.
-        try:
-            after = await after.guild.fetch_member(after.id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
         await sync_admin_message(after)
+        if nickname_changed:
+            message_id = admin_messages.get(str(after.id))
+            if message_id is not None:
+                channel = await get_admin_channel(after.guild)
+                if channel is not None:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                        await message.edit(view=MemberRoleView(after), allowed_mentions=discord.AllowedMentions.none())
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+                        print(f"❌ Nickname-Anzeige für {after} nicht aktualisierbar: {error}")
 
 
 @bot.event
