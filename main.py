@@ -463,9 +463,8 @@ class MemberRoleView(discord.ui.LayoutView):
         panel = discord.ui.Container()
         panel.add_item(discord.ui.TextDisplay(
             f"👤 **Neuer Benutzer:** {target_member.mention}\n"
-            f"`{target_member}`"
-            + (f" — Nickname: **{discord.utils.escape_markdown(target_member.display_name)}**"
-               if target_member.display_name != target_member.name else "")
+            f"`{discord.utils.escape_markdown(target_member.name)}` "
+            f"{discord.utils.escape_markdown(target_member.display_name)}"
         ))
         panel.add_item(discord.ui.ActionRow(NicknameButton()))
         panel.add_item(discord.ui.TextDisplay(
